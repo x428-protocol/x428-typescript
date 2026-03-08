@@ -62,6 +62,8 @@ export interface McpServerWithInit {
     ): Promise<{ action: string; content?: Record<string, unknown> }>;
   };
   tool(...args: any[]): any;
+  /** registerTool supports _meta in tool definitions (required for MCP Apps). */
+  registerTool?(name: string, config: Record<string, unknown>, cb: Function): any;
   resource?(...args: any[]): any;
 }
 
@@ -173,6 +175,24 @@ function detectAppsSupport(server: McpServerWithInit): boolean {
   return state.supportsApps;
 }
 
+/**
+ * Register the shared UI resource eagerly (once per server).
+ * Must be available before tools/list so Inspector can fetch it.
+ */
+function ensureResourceRegistered(server: McpServerWithInit): void {
+  const state = getAppsState(server);
+  if (state.resourceRegistered || !server.resource) return;
+  state.resourceRegistered = true;
+  server.resource(
+    "x428-guard-ui",
+    UI_RESOURCE_URI,
+    { mimeType: RESOURCE_MIME_TYPE },
+    async () => ({
+      contents: [{ uri: UI_RESOURCE_URI, mimeType: RESOURCE_MIME_TYPE, text: buildAppHtml() }],
+    }),
+  );
+}
+
 function ensureAppsInfrastructure(
   server: McpServerWithInit,
   pendingChallenges: Map<string, PreconditionChallenge>,
@@ -186,18 +206,7 @@ function ensureAppsInfrastructure(
 ): void {
   const state = getAppsState(server);
 
-  // Register the shared UI resource (once per server)
-  if (!state.resourceRegistered && server.resource) {
-    state.resourceRegistered = true;
-    server.resource(
-      "x428-guard-ui",
-      UI_RESOURCE_URI,
-      { mimeType: RESOURCE_MIME_TYPE },
-      async () => ({
-        contents: [{ uri: UI_RESOURCE_URI, mimeType: RESOURCE_MIME_TYPE, text: buildAppHtml() }],
-      }),
-    );
-  }
+  // Resource is registered eagerly by ensureResourceRegistered() — no need to re-register here.
 
   // Register the hidden x428/attest tool (once per server)
   if (!state.attestToolRegistered) {
@@ -284,6 +293,10 @@ export function x428Guard(
   // Install interceptor to capture raw extensions before Zod strips them
   installMessageInterceptor(mcpServer);
 
+  // Eagerly register the shared UI resource (once per server) so it's available
+  // when Inspector sees _meta.ui.resourceUri in tools/list and tries to fetch it
+  ensureResourceRegistered(mcpServer);
+
   function getCachedToken(sessionId: string): AttestationToken | undefined {
     const key = `${sessionId}:${resourceUri}`;
     const cached = tokenCache.get(key);
@@ -291,12 +304,7 @@ export function x428Guard(
     return undefined;
   }
 
-  // Register tool immediately so capabilities are advertised
-  const toolArgs: any[] = [toolName];
-  if (toolConfig.description) toolArgs.push(toolConfig.description);
-  if (toolConfig.inputSchema) toolArgs.push(toolConfig.inputSchema);
-
-  toolArgs.push(async (args: any, extra: McpToolExtra) => {
+  const toolCallback = async (args: any, extra: McpToolExtra) => {
     const sessionId = extra.sessionId ?? "_default";
     const cached = getCachedToken(sessionId);
     if (cached) return handler(args, extra);
@@ -309,9 +317,23 @@ export function x428Guard(
     } else {
       return handleElicitationPath(args, extra, sessionId);
     }
-  });
+  };
 
-  mcpServer.tool(...toolArgs);
+  // Use registerTool() if available (supports _meta for MCP Apps tool definitions),
+  // fall back to tool() for compatibility with minimal McpServer implementations.
+  if (mcpServer.registerTool) {
+    mcpServer.registerTool(toolName, {
+      ...(toolConfig.description ? { description: toolConfig.description } : {}),
+      ...(toolConfig.inputSchema ? { inputSchema: toolConfig.inputSchema } : {}),
+      _meta: { ui: { resourceUri: UI_RESOURCE_URI } },
+    }, toolCallback);
+  } else {
+    const toolArgs: any[] = [toolName];
+    if (toolConfig.description) toolArgs.push(toolConfig.description);
+    if (toolConfig.inputSchema) toolArgs.push(toolConfig.inputSchema);
+    toolArgs.push(toolCallback);
+    mcpServer.tool(...toolArgs);
+  }
 
   // --- MCP Apps path ---
   function handleAppsPath(args: any, extra: McpToolExtra, sessionId: string): any {

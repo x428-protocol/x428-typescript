@@ -58,6 +58,9 @@ function createMockMcpServer(supportsApps = false): McpServerWithInit & {
       const handler = args[args.length - 1];
       tools.set(name, { handler });
     }),
+    registerTool: vi.fn((name: string, _config: any, handler: Function) => {
+      tools.set(name, { handler });
+    }),
     resource: vi.fn((_name: string, uri: string, _config: any, handler: Function) => {
       resources.set(uri, handler);
     }),
