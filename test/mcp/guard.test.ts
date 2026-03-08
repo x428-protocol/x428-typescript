@@ -33,7 +33,9 @@ function createMockMcpServer(): McpServerWithInit & {
   const resources = new Map<string, Function>();
 
   const server: any = {
-    getClientCapabilities: vi.fn().mockReturnValue({}),
+    getClientCapabilities: vi.fn().mockReturnValue({
+      extensions: { "io.modelcontextprotocol/ui": { mimeTypes: ["text/html;profile=mcp-app"] } },
+    }),
     oninitialized: null as (() => void) | null,
     elicitInput: vi.fn(async (params: any) => {
       const schema = params.requestedSchema as { required?: string[] };
@@ -378,8 +380,12 @@ describe("x428Guard — elicitation fallback", () => {
     expect(result.content[0].text).toContain("declined");
   });
 
-  it("uses Apps path when client has no elicitation capability", async () => {
-    const mcpServer = createMockMcpServer(); // no elicitation in capabilities
+  it("uses Apps path when client has extensions but no elicitation", async () => {
+    const mcpServer = createMockMcpServer();
+    // Advertise Apps support via extensions
+    mcpServer.server.getClientCapabilities = vi.fn().mockReturnValue({
+      extensions: { "io.modelcontextprotocol/ui": { mimeTypes: ["text/html;profile=mcp-app"] } },
+    });
     const handler = vi.fn();
 
     x428Guard(mcpServer, {
@@ -393,5 +399,23 @@ describe("x428Guard — elicitation fallback", () => {
     expect(result.structuredContent.x428Status).toBe("pending");
     expect(handler).not.toHaveBeenCalled();
     expect(mcpServer.server.elicitInput).not.toHaveBeenCalled();
+  });
+
+  it("returns error when client has neither elicitation nor Apps", async () => {
+    const mcpServer = createMockMcpServer();
+    // Empty capabilities — no elicitation, no extensions
+    mcpServer.server.getClientCapabilities = vi.fn().mockReturnValue({});
+    const handler = vi.fn();
+
+    x428Guard(mcpServer, {
+      preconditions: [
+        { type: "tos", tosVersion: "1.0", documentUrl: "https://example.com/tos", documentHash: "sha256-abc" },
+      ],
+    }, "search", {}, handler);
+
+    const result = await mcpServer.callTool("search", {}, mockExtra("e4"));
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("does not support");
+    expect(handler).not.toHaveBeenCalled();
   });
 });

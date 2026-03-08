@@ -299,10 +299,14 @@ export function x428Guard(
     const challenge = generateChallenge(config.preconditions, resourceUri, { ttlSeconds: 300 });
     const preconditions = challenge.preconditions as PreconditionObject[];
 
-    // Check if client supports elicitation — use it as fallback for non-Apps clients.
-    // Clients like Inspector advertise elicitation; Claude Desktop does not (it uses Apps).
+    // Detect client capabilities to choose the right acceptance path.
+    // Claude Desktop sends extensions["io.modelcontextprotocol/ui"] (Apps support).
+    // Inspector sends elicitation capability (checkbox dialogs).
+    // Clients with neither cannot complete precondition acceptance.
     const clientCaps = mcpServer.server.getClientCapabilities?.() as Record<string, unknown> | null | undefined;
     const hasElicitation = !!(clientCaps && "elicitation" in clientCaps);
+    const extensions = clientCaps?.extensions as Record<string, unknown> | undefined;
+    const hasApps = !!(extensions?.["io.modelcontextprotocol/ui"]);
     const elicitFn = mcpServer.server.elicitInput;
 
     if (hasElicitation && elicitFn) {
@@ -342,6 +346,14 @@ export function x428Guard(
     }
 
     // Apps path: return structuredContent for the App iframe.
+    // Requires client to advertise extensions["io.modelcontextprotocol/ui"].
+    if (!hasApps) {
+      return {
+        content: [{ type: "text", text: `x428: This tool requires precondition acceptance, but the client does not support elicitation or MCP Apps (extensions["io.modelcontextprotocol/ui"]). Cannot proceed.` }],
+        isError: true,
+      };
+    }
+
     // The host renders the iframe; the App calls x428/attest on acceptance.
     state.pendingChallenges.set(sessionId, challenge);
 
