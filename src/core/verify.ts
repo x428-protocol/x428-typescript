@@ -97,7 +97,7 @@ export async function verifyAttestation(
   }
 
   // Step 2: Well-formed check
-  const p = payload as Record<string, unknown>;
+  const p = payload as unknown as Record<string, unknown>;
   if (
     !Array.isArray(p.attestations) ||
     !p.challenge ||
@@ -190,7 +190,7 @@ export async function verifyAttestation(
   // Step 10: Per-type validation
   for (const precondition of challenge.preconditions) {
     const att = attestationsByPreconditionId.get(precondition.id)!;
-    const preconditionAny = precondition as Record<string, unknown>;
+    const preconditionAny = precondition as unknown as Record<string, unknown>;
     const type = preconditionAny.type as string;
     const method = att.method as string;
     const allowedMethods = preconditionAny.allowedAttestationMethods as string[];
