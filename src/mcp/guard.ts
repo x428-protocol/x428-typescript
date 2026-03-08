@@ -135,12 +135,14 @@ function getAppsState(server: McpServerWithInit): AppsState {
 }
 
 /**
- * Intercept the low-level server's _onmessage to capture raw `extensions`
+ * Intercept the low-level server's _onrequest to capture raw `extensions`
  * from the `initialize` request before Zod parsing strips them.
  *
  * The MCP SDK's ClientCapabilitiesSchema uses z.object() without .passthrough(),
  * which strips unknown keys including `extensions` (pending SEP-1724).
- * This workaround captures the raw extensions before they're lost.
+ * The SDK's connect() inlines message dispatch (no _onmessage method),
+ * but _onrequest receives the raw JSON-RPC request before handler-level
+ * Zod parsing strips unknown fields.
  */
 function installMessageInterceptor(server: McpServerWithInit): void {
   const state = getAppsState(server);
@@ -148,18 +150,18 @@ function installMessageInterceptor(server: McpServerWithInit): void {
   state.messageIntercepted = true;
 
   const lowLevel = server.server as any;
-  const original = lowLevel._onmessage;
+  const original = lowLevel._onrequest;
   if (typeof original !== "function") return;
 
-  lowLevel._onmessage = function (message: any, extra: any) {
+  lowLevel._onrequest = function (request: any, extra: any) {
     if (
-      message?.method === "initialize" &&
-      message?.params?.capabilities?.extensions
+      request?.method === "initialize" &&
+      request?.params?.capabilities?.extensions
     ) {
-      state.rawExtensions = message.params.capabilities.extensions;
+      state.rawExtensions = request.params.capabilities.extensions;
       console.error(`[x428] Captured raw extensions from initialize:`, JSON.stringify(state.rawExtensions));
     }
-    return original.call(this, message, extra);
+    return original.call(this, request, extra);
   };
 }
 

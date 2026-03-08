@@ -47,8 +47,8 @@ function createMockMcpServer(supportsApps = false): McpServerWithInit & {
       content.confirm = true;
       return { action: "accept", content };
     }),
-    // Provide _onmessage so the interceptor can wrap it
-    _onmessage: vi.fn(),
+    // Provide _onrequest so the interceptor can wrap it
+    _onrequest: vi.fn(),
   };
 
   const mcpServer = {
@@ -76,9 +76,9 @@ function createMockMcpServer(supportsApps = false): McpServerWithInit & {
      * Call this after x428Guard to trigger the interceptor.
      */
     simulateInitialize() {
-      if (supportsApps && server._onmessage) {
-        // The interceptor wraps _onmessage; call the wrapper with a fake initialize message
-        server._onmessage({
+      if (supportsApps && server._onrequest) {
+        // The interceptor wraps _onrequest; call the wrapper with a fake initialize request
+        server._onrequest({
           jsonrpc: "2.0",
           id: 1,
           method: "initialize",
