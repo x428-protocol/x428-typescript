@@ -28,6 +28,8 @@ function createMockMcpServer(): McpServerWithInit & {
   _tools: Map<string, { handler: Function; config?: any }>;
   _resources: Map<string, Function>;
   callTool(name: string, args: any, extra: McpToolExtra): Promise<any>;
+  /** Simulate an initialize request to populate rawExtensions (call after x428Guard). */
+  simulateInitialize(extensions?: Record<string, unknown>): Promise<void>;
 } {
   const tools = new Map<string, { handler: Function; config?: any }>();
   const resources = new Map<string, Function>();
@@ -36,6 +38,8 @@ function createMockMcpServer(): McpServerWithInit & {
     getClientCapabilities: vi.fn().mockReturnValue({
       extensions: { "io.modelcontextprotocol/ui": { mimeTypes: ["text/html;profile=mcp-app"] } },
     }),
+    // Minimal _onrequest stub so ensureExtensionsCapture can intercept it
+    _onrequest: vi.fn(async (_request: any, _extra: any) => {}),
     oninitialized: null as (() => void) | null,
     elicitInput: vi.fn(async (params: any) => {
       const schema = params.requestedSchema as { required?: string[] };
@@ -71,6 +75,15 @@ function createMockMcpServer(): McpServerWithInit & {
       const tool = tools.get(name);
       if (!tool) throw new Error(`Tool ${name} not registered`);
       return tool.handler(args, extra);
+    },
+    async simulateInitialize(extensions?: Record<string, unknown>) {
+      // Trigger the wrapped _onrequest with a fake initialize request
+      // so ensureExtensionsCapture populates rawExtensions.
+      const ext = extensions ?? { "io.modelcontextprotocol/ui": { mimeTypes: ["text/html;profile=mcp-app"] } };
+      await server._onrequest(
+        { method: "initialize", params: { capabilities: { extensions: ext } } },
+        {},
+      );
     },
   };
 }
@@ -286,6 +299,7 @@ describe("x428Guard — MCP Apps mode", () => {
       ],
     }, "search", {}, handler);
 
+    await mcpServer.simulateInitialize();
     const result = await mcpServer.callTool("search", { query: "test" }, mockExtra());
     expect(result.structuredContent.x428Status).toBe("pending");
     expect(result.structuredContent.toolName).toBe("search");
@@ -304,6 +318,7 @@ describe("x428Guard — MCP Apps mode", () => {
       ],
     }, "search", {}, handler);
 
+    await mcpServer.simulateInitialize();
     const extra = mockExtra("s1");
     // First call → pending
     await mcpServer.callTool("search", {}, extra);
@@ -325,6 +340,7 @@ describe("x428Guard — MCP Apps mode", () => {
       ],
     }, "search", {}, handler);
 
+    await mcpServer.simulateInitialize();
     const extra = mockExtra("s2");
     await mcpServer.callTool("search", {}, extra);
     const result = await mcpServer.callTool("x428/attest", { challengeId: "s2", accepted: false }, extra);
@@ -394,6 +410,7 @@ describe("x428Guard — elicitation fallback", () => {
       ],
     }, "search", {}, handler);
 
+    await mcpServer.simulateInitialize();
     const result = await mcpServer.callTool("search", {}, mockExtra("e3"));
     // Apps path returns structuredContent
     expect(result.structuredContent.x428Status).toBe("pending");

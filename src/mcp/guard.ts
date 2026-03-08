@@ -115,6 +115,9 @@ interface ServerState {
   pendingChallenges: Map<string, PreconditionChallenge>;
   attestToolRegistered: boolean;
   resourceRegistered: boolean;
+  /** Raw extensions from client capabilities, captured before Zod strips them. */
+  rawExtensions?: Record<string, unknown>;
+  extensionsCaptured: boolean;
 }
 
 const serverStateMap = new WeakMap<McpServerWithInit, ServerState>();
@@ -126,10 +129,35 @@ function getServerState(server: McpServerWithInit): ServerState {
       pendingChallenges: new Map(),
       attestToolRegistered: false,
       resourceRegistered: false,
+      extensionsCaptured: false,
     };
     serverStateMap.set(server, state);
   }
   return state;
+}
+
+/**
+ * Intercept the low-level Server's _onrequest to capture `extensions`
+ * from the initialize request before Zod strips it.
+ *
+ * The MCP SDK's ClientCapabilitiesSchema uses z.object() without
+ * .passthrough(), so `extensions` is silently dropped during Zod parsing
+ * in setRequestHandler(). The raw request at _onrequest() still has it.
+ */
+function ensureExtensionsCapture(mcpServer: McpServerWithInit, state: ServerState): void {
+  if (state.extensionsCaptured) return;
+  state.extensionsCaptured = true;
+
+  const rawServer = mcpServer.server as any;
+  const origOnRequest = rawServer._onrequest?.bind(rawServer);
+  if (!origOnRequest) return;
+
+  rawServer._onrequest = (request: any, extra: any) => {
+    if (request?.method === "initialize" && request?.params?.capabilities?.extensions) {
+      state.rawExtensions = request.params.capabilities.extensions;
+    }
+    return origOnRequest(request, extra);
+  };
 }
 
 /**
@@ -277,6 +305,9 @@ export function x428Guard(
   const { did: operatorDid, privateKey } = createEphemeralDid();
   const state = getServerState(mcpServer);
 
+  // Capture raw extensions before Zod strips them
+  ensureExtensionsCapture(mcpServer, state);
+
   // Eagerly register shared infrastructure
   ensureResourceRegistered(mcpServer);
   ensureAttestToolRegistered(
@@ -303,10 +334,12 @@ export function x428Guard(
     // Claude Desktop sends extensions["io.modelcontextprotocol/ui"] (Apps support).
     // Inspector sends elicitation capability (checkbox dialogs).
     // Clients with neither cannot complete precondition acceptance.
+    //
+    // Note: extensions is captured from the raw initialize request before
+    // Zod strips it (SDK bug — ClientCapabilitiesSchema lacks .passthrough()).
     const clientCaps = mcpServer.server.getClientCapabilities?.() as Record<string, unknown> | null | undefined;
     const hasElicitation = !!(clientCaps && "elicitation" in clientCaps);
-    const extensions = clientCaps?.extensions as Record<string, unknown> | undefined;
-    const hasApps = !!(extensions?.["io.modelcontextprotocol/ui"]);
+    const hasApps = !!(state.rawExtensions?.["io.modelcontextprotocol/ui"]);
     const elicitFn = mcpServer.server.elicitInput;
 
     if (hasElicitation && elicitFn) {
