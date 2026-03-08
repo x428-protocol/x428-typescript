@@ -1,0 +1,3 @@
+[submodule "vendor/spec"]
+	path = vendor/spec
+	url = https://github.com/x428-protocol/spec.git

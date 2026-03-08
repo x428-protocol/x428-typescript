@@ -5,7 +5,7 @@ export default defineConfig({
   test: { globals: true },
   resolve: {
     alias: {
-      "@x428-vectors": resolve(__dirname, "../spec/vectors/generated"),
+      "@x428-vectors": resolve(__dirname, "vendor/spec/vectors/generated"),
     },
   },
 });
