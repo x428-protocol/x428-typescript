@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { verifyPayloadSignature, base64urlDecode } from "../../src/core/signing.js";
-import vectors from "../vectors/signature.json";
+import vectors from "@x428-vectors/signature.json";
 
 interface SignatureVector {
   description: string;

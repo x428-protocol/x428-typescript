@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { scopeMatches, generateToken, validateToken } from "../../src/core/token.js";
 import { X428Error } from "../../src/core/errors.js";
 import { InMemoryNonceStore } from "../../src/core/nonce.js";
-import vectors from "../vectors/scope.json";
+import vectors from "@x428-vectors/scope.json";
 
 interface ScopeVector {
   description: string;

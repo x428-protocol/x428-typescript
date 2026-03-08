@@ -5,12 +5,12 @@ import { InMemoryNonceStore } from "../../src/core/nonce.js";
 import { X428Error } from "../../src/core/errors.js";
 import type { AttestationToken } from "../../src/core/types.js";
 
-import verifyCommonVectors from "../vectors/verify-common.json";
-import verifyTosVectors from "../vectors/verify-tos.json";
-import verifyAgeVectors from "../vectors/verify-age.json";
-import verifyIdentityVectors from "../vectors/verify-identity.json";
-import verifyMultiVectors from "../vectors/verify-multi.json";
-import verifySequenceVectors from "../vectors/verify-sequence.json";
+import verifyCommonVectors from "@x428-vectors/verify-common.json";
+import verifyTosVectors from "@x428-vectors/verify-tos.json";
+import verifyAgeVectors from "@x428-vectors/verify-age.json";
+import verifyIdentityVectors from "@x428-vectors/verify-identity.json";
+import verifyMultiVectors from "@x428-vectors/verify-multi.json";
+import verifySequenceVectors from "@x428-vectors/verify-sequence.json";
 
 function runVerifyVector(vector: any, sharedStore?: InMemoryNonceStore) {
   const {

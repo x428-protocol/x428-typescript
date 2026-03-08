@@ -1,2 +1,11 @@
 import { defineConfig } from "vitest/config";
-export default defineConfig({ test: { globals: true } });
+import { resolve } from "node:path";
+
+export default defineConfig({
+  test: { globals: true },
+  resolve: {
+    alias: {
+      "@x428-vectors": resolve(__dirname, "../spec/vectors/generated"),
+    },
+  },
+});

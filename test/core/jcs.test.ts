@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { jcsCanonical, jcsCanonicalHex } from "../../src/core/jcs.js";
-import vectors from "../vectors/jcs.json";
+import vectors from "@x428-vectors/jcs.json";
 
 describe("JCS canonicalization", () => {
   for (const vector of vectors) {

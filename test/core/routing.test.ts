@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { determinePayloadForm } from "../../src/core/routing.js";
-import vectors from "../vectors/payload-routing.json";
+import vectors from "@x428-vectors/payload-routing.json";
 
 describe("Payload routing", () => {
   for (const vector of vectors) {
