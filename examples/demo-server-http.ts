@@ -129,6 +129,29 @@ const httpServer = createServer(async (req, res) => {
           return result;
         });
       }
+
+      // Log tools/call requests
+      const origToolsCall = rawServer._requestHandlers.get("tools/call");
+      if (origToolsCall) {
+        rawServer._requestHandlers.set("tools/call", async (req: any, extra: any) => {
+          log(`>> tools/call: ${JSON.stringify(req.params)}`);
+          const result = await origToolsCall(req, extra);
+          log(`<< tools/call result: ${JSON.stringify(result, null, 2)}`);
+          return result;
+        });
+      }
+
+      // Log tools/list requests
+      const origToolsList = rawServer._requestHandlers.get("tools/list");
+      if (origToolsList) {
+        rawServer._requestHandlers.set("tools/list", async (req: any, extra: any) => {
+          log(`>> tools/list`);
+          const result = await origToolsList(req, extra);
+          const names = result.tools?.map((t: any) => t.name) ?? [];
+          log(`<< tools/list: [${names.join(", ")}]`);
+          return result;
+        });
+      }
     }
 
     await server.connect(transport);
