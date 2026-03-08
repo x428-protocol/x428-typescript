@@ -16,6 +16,13 @@ describe("buildAppHtml", () => {
     expect(html).toContain("ui/notifications/tool-result");
   });
 
+  it("uses correct ui/initialize params", () => {
+    const html = buildAppHtml();
+    expect(html).toContain("appCapabilities");
+    expect(html).not.toContain('"capabilities": {}');
+    expect(html).toContain('protocolVersion: "2025-11-21"');
+  });
+
   it("contains accept and decline UI", () => {
     const html = buildAppHtml();
     expect(html).toContain("Accept");
