@@ -27,7 +27,7 @@ git add vendor/spec && git commit -m "update spec vectors"
 
 ## Quick Start — MCP Guard
 
-Gate any MCP tool behind TOS/AGE confirmation with a single wrapper:
+Gate any MCP tool behind TOS/AGE confirmation:
 
 ```typescript
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -35,23 +35,17 @@ import { x428Guard } from "x428";
 
 const mcpServer = new McpServer({ name: "my-server", version: "1.0.0" });
 
-mcpServer.tool(
-  "search",
-  { query: { type: "string" } },
-  x428Guard(
-    {
-      server: mcpServer.server,
-      preconditions: [
-        { type: "tos", documentUrl: "https://example.com/tos", tosVersion: "2.1", documentHash: "sha256-abc" },
-        { type: "age", minimumAge: 18 },
-      ],
-    },
-    async (args, extra) => {
-      // Your tool logic — only runs after user accepts TOS and confirms age
-      return { content: [{ type: "text", text: `Results for: ${args.query}` }] };
-    },
-  ),
-);
+x428Guard(mcpServer, {
+  preconditions: [
+    { type: "tos", documentUrl: "https://example.com/tos", tosVersion: "2.1", documentHash: "sha256-abc" },
+    { type: "age", minimumAge: 18 },
+  ],
+}, "search", {
+  description: "Search things",
+  inputSchema: { query: { type: "string" } },
+}, async (args, extra) => {
+  return { content: [{ type: "text", text: `Results for: ${args.query}` }] };
+});
 ```
 
 Or gate all tools at once:
@@ -71,7 +65,11 @@ mcpServer.tool("search", { query: { type: "string" } }, async (args, extra) => {
 });
 ```
 
-When a user calls a guarded tool, the MCP client shows confirmation dialogs for each precondition. After acceptance, a token is cached per session so subsequent calls skip re-confirmation.
+### Automatic MCP Apps support
+
+When the MCP client supports [MCP Apps](https://modelcontextprotocol.io/docs/extensions/apps) (Claude Desktop, VS Code Copilot, etc.), the guard automatically renders a rich inline acceptance UI directly in the conversation — showing TOS documents, age requirements, and identity prompts with styled Accept/Decline buttons.
+
+For clients without MCP Apps support, the guard falls back to standard MCP elicitation dialogs. No code changes needed — detection is automatic via capability negotiation at connection time.
 
 ## Core Protocol API
 
@@ -163,6 +161,7 @@ Implementing full RDFC-1.0 requires a JSON-LD processor dependency. See [#1](htt
 - `@noble/curves` — Ed25519 (audited, no native deps)
 - `canonicalize` — JCS (RFC 8785)
 - `@modelcontextprotocol/sdk` — optional peer dependency (only needed for MCP guard)
+- `@modelcontextprotocol/ext-apps` — optional peer dependency (enables rich inline UI for MCP Apps-capable clients)
 
 ## License
 

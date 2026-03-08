@@ -1,34 +1,51 @@
-import type { X428Config } from "./guard.js";
 import { x428Guard } from "./guard.js";
+import type { X428Config, McpServerWithInit } from "./guard.js";
 
 /**
  * Gate all tools on an MCP server behind x428 precondition attestation.
  *
- * Wraps the server's `tool` method so every tool registered after this call
- * is automatically guarded with the provided x428 config.
+ * Intercepts `mcpServer.tool()` calls and wraps each with `x428Guard`,
+ * which auto-detects MCP Apps support for rich inline UI or falls back
+ * to elicitation dialogs.
  *
  * @param mcpServer - The McpServer instance (from `@modelcontextprotocol/sdk`)
- * @param config - x428 configuration. The `server` field will be set automatically
- *   from `mcpServer.server` if not provided.
+ * @param config - x428 precondition configuration
  */
-export function x428Protect(mcpServer: { server: any; tool: (...args: any[]) => any }, config: Omit<X428Config, "server"> & { server?: X428Config["server"] }): void {
+export function x428Protect(
+  mcpServer: McpServerWithInit,
+  config: Omit<X428Config, "server"> & { server?: X428Config["server"] },
+): void {
   const fullConfig: X428Config = {
     ...config,
-    server: config.server ?? mcpServer.server,
+    server: config.server ?? (mcpServer.server as any),
   };
 
   const originalTool = mcpServer.tool.bind(mcpServer);
 
   mcpServer.tool = (...toolArgs: any[]) => {
-    // MCP SDK tool() signature: tool(name, schema, handler) or tool(name, description, schema, handler)
-    // The handler is always the last argument
+    // MCP SDK tool() signature variants:
+    //   tool(name, schema, handler)
+    //   tool(name, description, schema, handler)
+    const name = toolArgs[0] as string;
     const handlerIndex = toolArgs.length - 1;
-    const originalHandler = toolArgs[handlerIndex];
+    const handler = toolArgs[handlerIndex];
 
-    if (typeof originalHandler === "function") {
-      toolArgs[handlerIndex] = x428Guard(fullConfig, originalHandler);
+    if (typeof handler !== "function") {
+      return originalTool(...toolArgs);
     }
 
-    return originalTool(...toolArgs);
+    // Extract description and inputSchema based on argument count
+    let description: string | undefined;
+    let inputSchema: Record<string, unknown> | undefined;
+
+    if (toolArgs.length === 4) {
+      description = toolArgs[1];
+      inputSchema = toolArgs[2];
+    } else if (toolArgs.length === 3) {
+      inputSchema = toolArgs[1];
+    }
+
+    // Delegate to x428Guard which handles auto-detection
+    x428Guard(mcpServer, fullConfig, name, { description, inputSchema }, handler);
   };
 }

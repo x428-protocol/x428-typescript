@@ -1,4 +1,9 @@
-import type { AttestationToken, AttestationObject, PreconditionObject } from "../core/types.js";
+import type {
+  AttestationToken,
+  AttestationObject,
+  PreconditionObject,
+  PreconditionChallenge,
+} from "../core/types.js";
 import { generateChallenge, type PreconditionConfig } from "../core/challenge.js";
 import { buildAttestation } from "../core/attestation.js";
 import { verifyAttestation } from "../core/verify.js";
@@ -9,26 +14,24 @@ import type { NonceStore } from "../core/nonce.js";
 import { InMemoryNonceStore } from "../core/nonce.js";
 import { buildCombinedElicitation } from "./elicitation.js";
 import { createEphemeralDid } from "./ephemeral-did.js";
+import { buildAppHtml } from "./app-ui.js";
+import { z } from "zod";
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
 
 /**
- * Minimal interface for the MCP server object.
- * Matches `McpServer.server` from `@modelcontextprotocol/sdk`.
+ * Minimal interface for the low-level MCP Server (McpServer.server).
  */
 export interface McpServerLike {
-  elicitInput(params: {
-    mode: string;
-    message: string;
-    requestedSchema: Record<string, unknown>;
-  }, options?: { requestId?: string | number }): Promise<{
-    action: string;
-    content?: Record<string, unknown>;
-  }>;
+  elicitInput(
+    params: { mode: string; message: string; requestedSchema: Record<string, unknown> },
+    options?: { requestId?: string | number },
+  ): Promise<{ action: string; content?: Record<string, unknown> }>;
 }
 
-/**
- * Minimal interface for the `extra` parameter passed to MCP tool callbacks.
- * Matches `RequestHandlerExtra` from `@modelcontextprotocol/sdk`.
- */
+/** Minimal interface for the `extra` parameter passed to MCP tool callbacks. */
 export interface McpToolExtra {
   sessionId?: string;
   signal: AbortSignal;
@@ -38,155 +41,405 @@ export interface McpToolExtra {
 
 export interface X428Config {
   preconditions: PreconditionConfig[];
-  server: McpServerLike;
+  /** Required for elicitation fallback. Typically `mcpServer.server`. */
+  server?: McpServerLike;
   resourceUri?: string;
   tokenTtl?: number;
   didResolver?: DidResolver;
   nonceStore?: NonceStore;
 }
 
-export function x428Guard<TArgs, TResult>(
+/**
+ * Minimal McpServer shape accepted by x428Guard.
+ * Compatible with `McpServer` from `@modelcontextprotocol/sdk`.
+ */
+export interface McpServerWithInit {
+  server: {
+    getClientCapabilities?(): Record<string, unknown> | null | undefined;
+    oninitialized?: (() => void) | null;
+    elicitInput?(
+      params: { mode: string; message: string; requestedSchema: Record<string, unknown> },
+      options?: { requestId?: string | number },
+    ): Promise<{ action: string; content?: Record<string, unknown> }>;
+  };
+  tool(...args: any[]): any;
+  /** registerTool supports _meta in tool definitions (required for MCP Apps). */
+  registerTool?(name: string, config: Record<string, unknown>, cb: Function): any;
+  /** registerResource supports mimeType config. */
+  registerResource?(name: string, uri: string, config: Record<string, unknown>, cb: Function): any;
+  resource?(...args: any[]): any;
+}
+
+// UI resource URI shared by all guarded tools
+const UI_RESOURCE_URI = "ui://x428/guard";
+const RESOURCE_MIME_TYPE = "text/html;profile=mcp-app";
+// ext-apps SDK uses both nested and flat key formats for _meta
+const UI_META = { ui: { resourceUri: UI_RESOURCE_URI }, "ui/resourceUri": UI_RESOURCE_URI };
+
+// ---------------------------------------------------------------------------
+// Shared attestation helpers
+// ---------------------------------------------------------------------------
+
+function buildAttestationsFromChallenge(
+  challenge: PreconditionChallenge,
+): AttestationObject[] {
+  const now = new Date().toISOString();
+  return (challenge.preconditions as PreconditionObject[]).map((p) => {
+    const base = { preconditionId: p.id, method: "self" as const, confirmedAt: now };
+    switch (p.type) {
+      case "tos":
+        return { ...base, type: "tos" as const, documentHash: p.documentHash };
+      case "age":
+        return { ...base, type: "age" as const, minimumAge: p.minimumAge };
+      case "identity":
+        return { ...base, type: "identity" as const };
+    }
+  });
+}
+
+async function processAttestation(
+  challenge: PreconditionChallenge,
+  operatorDid: string,
+  privateKey: Uint8Array,
+  resolver: DidResolver,
+  nonceStore: NonceStore,
+  tokenTtl: number,
+): Promise<AttestationToken | X428Error> {
+  const attestations = buildAttestationsFromChallenge(challenge);
+  const payload = buildAttestation(challenge, operatorDid, privateKey, attestations);
+  return verifyAttestation(challenge, payload, resolver, nonceStore, undefined, tokenTtl);
+}
+
+// ---------------------------------------------------------------------------
+// Shared pending context — module-level so it works across MCP sessions.
+// Claude Desktop creates separate AppBridge and Model sessions with different
+// Mcp-Session-Id values (ext-apps#481). The App iframe's tools/call goes
+// through the AppBridge session, not the Model session that originally called
+// the tool. Keying by challengeId (UUID) instead of sessionId lets the
+// x428-attest call find the context regardless of which session it arrives on.
+// ---------------------------------------------------------------------------
+
+/** Pending challenges, keyed by challengeId (UUID) for cross-session lookup. */
+const sharedChallenges = new Map<string, PreconditionChallenge>();
+
+/** Attestation tokens, keyed by "sessionId:resourceUri" for standard lookup. */
+const sharedTokens = new Map<string, AttestationToken>();
+
+// Per-server state (registration flags + capability detection)
+interface ServerState {
+  attestToolRegistered: boolean;
+  resourceRegistered: boolean;
+  /** Raw extensions from client capabilities, captured before Zod strips them. */
+  rawExtensions?: Record<string, unknown>;
+  extensionsCaptured: boolean;
+}
+
+const serverStateMap = new WeakMap<McpServerWithInit, ServerState>();
+
+function getServerState(server: McpServerWithInit): ServerState {
+  let state = serverStateMap.get(server);
+  if (!state) {
+    state = {
+      attestToolRegistered: false,
+      resourceRegistered: false,
+      extensionsCaptured: false,
+    };
+    serverStateMap.set(server, state);
+  }
+  return state;
+}
+
+/**
+ * Intercept the low-level Server's _onrequest to capture `extensions`
+ * from the initialize request before Zod strips it.
+ *
+ * The MCP SDK's ClientCapabilitiesSchema uses z.object() without
+ * .passthrough(), so `extensions` is silently dropped during Zod parsing
+ * in setRequestHandler(). The raw request at _onrequest() still has it.
+ */
+function ensureExtensionsCapture(mcpServer: McpServerWithInit, state: ServerState): void {
+  if (state.extensionsCaptured) return;
+  state.extensionsCaptured = true;
+
+  const rawServer = mcpServer.server as any;
+  const origOnRequest = rawServer._onrequest?.bind(rawServer);
+  if (!origOnRequest) return;
+
+  rawServer._onrequest = (request: any, extra: any) => {
+    if (request?.method === "initialize" && request?.params?.capabilities?.extensions) {
+      state.rawExtensions = request.params.capabilities.extensions;
+    }
+    return origOnRequest(request, extra);
+  };
+}
+
+/**
+ * Register the shared UI resource (once per server).
+ * Uses registerResource if available, falls back to resource().
+ */
+function ensureResourceRegistered(server: McpServerWithInit): void {
+  const state = getServerState(server);
+  if (state.resourceRegistered) return;
+  state.resourceRegistered = true;
+
+  if (server.registerResource) {
+    server.registerResource(
+      "x428-guard-ui",
+      UI_RESOURCE_URI,
+      { mimeType: RESOURCE_MIME_TYPE },
+      async () => ({
+        contents: [{ uri: UI_RESOURCE_URI, mimeType: RESOURCE_MIME_TYPE, text: buildAppHtml() }],
+      }),
+    );
+  } else if (server.resource) {
+    server.resource(
+      "x428-guard-ui",
+      UI_RESOURCE_URI,
+      { mimeType: RESOURCE_MIME_TYPE },
+      async () => ({
+        contents: [{ uri: UI_RESOURCE_URI, mimeType: RESOURCE_MIME_TYPE, text: buildAppHtml() }],
+      }),
+    );
+  }
+}
+
+/**
+ * Register the x428-attest tool (once per server).
+ * This tool is called by the MCP App UI to confirm precondition acceptance.
+ */
+function ensureAttestToolRegistered(
+  server: McpServerWithInit,
+  operatorDid: string,
+  privateKey: Uint8Array,
+  resolver: DidResolver,
+  nonceStore: NonceStore,
+  tokenTtl: number,
+  resourceUri: string,
+): void {
+  const state = getServerState(server);
+  if (state.attestToolRegistered) return;
+  state.attestToolRegistered = true;
+
+  const attestHandler = async (args: { challengeId: string; accepted: boolean }, extra: McpToolExtra) => {
+    if (!args.accepted) {
+      return {
+        content: [{ type: "text", text: "x428: User declined preconditions." }],
+        isError: true,
+      };
+    }
+
+    const challenge = sharedChallenges.get(args.challengeId);
+    if (!challenge) {
+      return {
+        content: [{ type: "text", text: "x428: No pending challenge found." }],
+        isError: true,
+      };
+    }
+
+    try {
+      const result = await processAttestation(
+        challenge, operatorDid, privateKey, resolver, nonceStore, tokenTtl,
+      );
+
+      if (result instanceof X428Error) {
+        return {
+          content: [{ type: "text", text: `x428: Attestation failed: ${result.detail}` }],
+          isError: true,
+        };
+      }
+
+      // Cache token by the calling session's ID. The App iframe's
+      // re-call of the original tool uses the same session (AppBridge),
+      // so the token will be found by sessionId on the next call.
+      const sessionId = extra.sessionId ?? "_default";
+      const cacheKey = `${sessionId}:${resourceUri}`;
+      sharedTokens.set(cacheKey, result);
+      sharedChallenges.delete(args.challengeId);
+
+      return {
+        content: [{ type: "text", text: "x428: Attestation accepted. You may now use the tool." }],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `x428: Attestation error: ${err}` }],
+        isError: true,
+      };
+    }
+  };
+
+  // Register with visibility: ["app"] if registerTool available (hides from model)
+  if (server.registerTool) {
+    server.registerTool(
+      "x428-attest",
+      {
+        description: "x428 attestation endpoint",
+        inputSchema: { challengeId: z.string(), accepted: z.boolean() },
+        _meta: { ui: { resourceUri: UI_RESOURCE_URI, visibility: ["app"] }, "ui/resourceUri": UI_RESOURCE_URI },
+      },
+      attestHandler,
+    );
+  } else {
+    server.tool(
+      "x428-attest",
+      "x428 attestation endpoint",
+      { challengeId: z.string(), accepted: z.boolean() },
+      attestHandler,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// x428Guard — MCP Apps guard
+// ---------------------------------------------------------------------------
+
+/**
+ * Register a single MCP tool with x428 precondition enforcement via MCP Apps.
+ *
+ * Returns `structuredContent` with precondition data and `_meta.ui.resourceUri`.
+ * Apps-capable hosts (Claude Desktop, Inspector Apps tab) render an inline
+ * iframe for acceptance; the App calls `x428-attest` then re-calls the tool.
+ *
+ * For clients that support elicitation but not Apps (e.g. Inspector Tools tab),
+ * use `x428GuardElicitation` instead.
+ */
+export function x428Guard(
+  mcpServer: McpServerWithInit,
   config: X428Config,
+  toolName: string,
+  toolConfig: { description?: string; inputSchema?: Record<string, unknown> },
+  handler: (args: any, extra: McpToolExtra) => Promise<any>,
+): void {
+  const tokenTtl = config.tokenTtl ?? 3600;
+  const resolver = config.didResolver ?? new DidKeyResolver();
+  const nonceStore = config.nonceStore ?? new InMemoryNonceStore();
+  const resourceUri = config.resourceUri ?? `x428://mcp/tool/${toolName}`;
+  const { did: operatorDid, privateKey } = createEphemeralDid();
+  const state = getServerState(mcpServer);
+
+  // Capture raw extensions before Zod strips them (for future use)
+  ensureExtensionsCapture(mcpServer, state);
+
+  // Eagerly register shared infrastructure
+  ensureResourceRegistered(mcpServer);
+  ensureAttestToolRegistered(
+    mcpServer, operatorDid, privateKey, resolver, nonceStore, tokenTtl, resourceUri,
+  );
+
+  const toolCallback = async (args: any, extra: McpToolExtra) => {
+    // Check token cache by sessionId — works for re-calls from the App
+    // iframe since x428-attest and the re-call use the same session.
+    const sessionId = extra.sessionId ?? "_default";
+    const cacheKey = `${sessionId}:${resourceUri}`;
+    const cached = sharedTokens.get(cacheKey);
+    if (cached && new Date(cached.expiresAt) > new Date()) {
+      return handler(args, extra);
+    }
+
+    const challengeId = crypto.randomUUID();
+    const challenge = generateChallenge(config.preconditions, resourceUri, { ttlSeconds: 300 });
+    const preconditions = challenge.preconditions as PreconditionObject[];
+
+    // Store challenge in shared map keyed by challengeId (UUID).
+    // x428-attest finds it by challengeId regardless of session.
+    sharedChallenges.set(challengeId, challenge);
+
+    return {
+      content: [{ type: "text", text: `x428: Precondition acceptance required for ${toolName}.` }],
+      structuredContent: {
+        x428Status: "pending",
+        toolName,
+        toolArgs: args,
+        challengeId,
+        preconditions: preconditions.map((p) => ({
+          type: p.type,
+          ...(p.type === "tos" ? { documentUrl: p.documentUrl, tosVersion: p.tosVersion } : {}),
+          ...(p.type === "age" ? { minimumAge: p.minimumAge } : {}),
+        })),
+      },
+      _meta: UI_META,
+    };
+  };
+
+  // Use registerTool for _meta.ui support, fall back to tool() for compat
+  if (mcpServer.registerTool) {
+    mcpServer.registerTool(toolName, {
+      ...(toolConfig.description ? { description: toolConfig.description } : {}),
+      ...(toolConfig.inputSchema ? { inputSchema: toolConfig.inputSchema } : {}),
+      _meta: UI_META,
+    }, toolCallback);
+  } else {
+    const toolArgs: any[] = [toolName];
+    if (toolConfig.description) toolArgs.push(toolConfig.description);
+    if (toolConfig.inputSchema) toolArgs.push(toolConfig.inputSchema);
+    toolArgs.push(toolCallback);
+    mcpServer.tool(...toolArgs);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// x428GuardElicitation — elicitation-only guard (non-Apps clients)
+// ---------------------------------------------------------------------------
+
+/**
+ * Wrap a tool handler with x428 precondition enforcement using elicitation.
+ *
+ * This is for MCP clients that don't support MCP Apps. Returns a wrapped
+ * handler function that uses `elicitInput()` for confirmation dialogs.
+ * Use `x428Guard()` for MCP Apps-capable clients.
+ */
+export function x428GuardElicitation<TArgs, TResult>(
+  config: X428Config & { server: McpServerLike },
   handler: (args: TArgs, extra: McpToolExtra) => Promise<TResult>,
 ): (args: TArgs, extra: McpToolExtra) => Promise<TResult> {
   const tokenTtl = config.tokenTtl ?? 3600;
-  // Per-session token cache: cacheKey → token
   const tokenCache = new Map<string, AttestationToken>();
   const resolver = config.didResolver ?? new DidKeyResolver();
   const nonceStore = config.nonceStore ?? new InMemoryNonceStore();
-
-  // Generate an ephemeral keypair for self-attestation within the guard
   const { did: operatorDid, privateKey } = createEphemeralDid();
 
   return async (args: TArgs, extra: McpToolExtra) => {
-    const resourceUri = config.resourceUri ?? `x428://mcp/tool`;
+    const resUri = config.resourceUri ?? "x428://mcp/tool";
     const sessionId = extra.sessionId ?? "_default";
-    const cacheKey = `${sessionId}:${resourceUri}`;
+    const cacheKey = `${sessionId}:${resUri}`;
 
-    // Check cached token
     const cached = tokenCache.get(cacheKey);
     if (cached && new Date(cached.expiresAt) > new Date()) {
       return handler(args, extra);
     }
 
-    // Generate challenge
-    const challenge = generateChallenge(config.preconditions, resourceUri, { ttlSeconds: 300 });
-    console.error(`[x428] Generated challenge with ${challenge.preconditions.length} preconditions`);
-
-    // Elicit user confirmation for all preconditions in a single form
-    // (MCP clients may not support multiple sequential elicitations)
+    const challenge = generateChallenge(config.preconditions, resUri, { ttlSeconds: 300 });
     const preconditions = challenge.preconditions as PreconditionObject[];
     const elicitReq = buildCombinedElicitation(preconditions);
-    console.error(`[x428] Eliciting ${preconditions.length} precondition(s) in single form`);
 
     let elicitResult: { action: string; content?: Record<string, unknown> };
     try {
       elicitResult = await config.server.elicitInput(elicitReq, { requestId: extra.requestId });
     } catch (err) {
-      console.error(`[x428] elicitInput threw:`, err);
-      return {
-        content: [{ type: "text", text: `x428: Elicitation failed: ${err}` }],
-        isError: true,
-      } as unknown as TResult;
+      return { content: [{ type: "text", text: `x428: Elicitation failed: ${err}` }], isError: true } as unknown as TResult;
     }
-
-    console.error(`[x428] Elicitation result: ${JSON.stringify(elicitResult)}`);
 
     if (elicitResult.action !== "accept") {
-      return {
-        content: [{ type: "text", text: `x428: User declined precondition(s).` }],
-        isError: true,
-      } as unknown as TResult;
+      return { content: [{ type: "text", text: "x428: User declined precondition(s)." }], isError: true } as unknown as TResult;
     }
 
-    // Verify each precondition was confirmed
-    const attestations: AttestationObject[] = [];
     for (const precondition of preconditions) {
-      // For single-precondition forms, check legacy keys too
       const fieldKey = `confirm_${precondition.id}`;
       const confirmed = elicitResult.content?.[fieldKey]
         ?? (preconditions.length === 1 && (elicitResult.content?.accept ?? elicitResult.content?.confirm));
-
       if (!confirmed) {
-        return {
-          content: [{ type: "text", text: `x428: User did not confirm ${precondition.type} precondition.` }],
-          isError: true,
-        } as unknown as TResult;
-      }
-
-      const now = new Date().toISOString();
-      if (precondition.type === "tos") {
-        attestations.push({
-          preconditionId: precondition.id,
-          type: "tos",
-          method: "self",
-          documentHash: precondition.documentHash,
-          confirmedAt: now,
-        });
-      } else if (precondition.type === "age") {
-        attestations.push({
-          preconditionId: precondition.id,
-          type: "age",
-          method: "self",
-          minimumAge: precondition.minimumAge,
-          confirmedAt: now,
-        });
-      } else if (precondition.type === "identity") {
-        attestations.push({
-          preconditionId: precondition.id,
-          type: "identity",
-          method: "self",
-          confirmedAt: now,
-        });
+        return { content: [{ type: "text", text: `x428: User did not confirm ${precondition.type} precondition.` }], isError: true } as unknown as TResult;
       }
     }
 
-    console.error(`[x428] All ${attestations.length} preconditions confirmed, building attestation`);
-
-    // Build attestation through the core pipeline
-    let payload;
     try {
-      payload = buildAttestation(challenge, operatorDid, privateKey, attestations);
-      console.error(`[x428] Attestation built successfully`);
+      const result = await processAttestation(challenge, operatorDid, privateKey, resolver, nonceStore, tokenTtl);
+      if (result instanceof X428Error) {
+        return { content: [{ type: "text", text: `x428: Attestation verification failed: ${result.detail}` }], isError: true } as unknown as TResult;
+      }
+      tokenCache.set(cacheKey, result);
+      return handler(args, extra);
     } catch (err) {
-      console.error(`[x428] buildAttestation threw:`, err);
-      return {
-        content: [{ type: "text", text: `x428: Failed to build attestation: ${err}` }],
-        isError: true,
-      } as unknown as TResult;
+      return { content: [{ type: "text", text: `x428: Attestation error: ${err}` }], isError: true } as unknown as TResult;
     }
-
-    // Verify through the core pipeline
-    let verifyResult;
-    try {
-      verifyResult = await verifyAttestation(
-        challenge,
-        payload,
-        resolver,
-        nonceStore,
-        undefined,
-        tokenTtl,
-      );
-      console.error(`[x428] Verification result: ${verifyResult instanceof X428Error ? `ERROR: ${verifyResult.detail}` : "OK"}`);
-    } catch (err) {
-      console.error(`[x428] verifyAttestation threw:`, err);
-      return {
-        content: [{ type: "text", text: `x428: Verification threw: ${err}` }],
-        isError: true,
-      } as unknown as TResult;
-    }
-
-    if (verifyResult instanceof X428Error) {
-      return {
-        content: [{ type: "text", text: `x428: Attestation verification failed: ${verifyResult.detail}` }],
-        isError: true,
-      } as unknown as TResult;
-    }
-
-    // Cache the token keyed by session
-    tokenCache.set(cacheKey, verifyResult);
-    console.error(`[x428] Token cached, proceeding to handler`);
-
-    return handler(args, extra);
   };
 }
