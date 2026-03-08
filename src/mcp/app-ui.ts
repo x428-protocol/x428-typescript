@@ -178,8 +178,8 @@ export function buildAppHtml(): string {
     try {
       const result = await sendRpc("ui/initialize", {
         appInfo: { name: "x428-guard", version: "0.1.0" },
-        capabilities: {},
-        protocolVersion: "2026-01-26"
+        appCapabilities: {},
+        protocolVersion: "2025-11-21"
       });
       hostContext = result.hostContext || {};
       applyTheme();
