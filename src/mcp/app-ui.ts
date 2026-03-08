@@ -9,7 +9,7 @@
  * 2. App sends ui/notifications/initialized to signal readiness
  * 3. Host sends ui/notifications/tool-result with structuredContent
  * 4. If structuredContent.x428Status === "pending", renders precondition cards
- * 5. User clicks Accept → app calls x428/attest server tool
+ * 5. User clicks Accept → app calls x428-attest server tool
  * 6. App re-calls the original tool (structuredContent.toolName/toolArgs)
  * 7. Second call succeeds (token cached), app shows result
  */
@@ -249,9 +249,9 @@ export function buildAppHtml(): string {
     if (declineBtn) declineBtn.disabled = true;
 
     try {
-      // Call the hidden x428/attest tool to build + verify attestation
+      // Call the hidden x428-attest tool to build + verify attestation
       const attestResult = await sendRpc("tools/call", {
-        name: "x428/attest",
+        name: "x428-attest",
         arguments: {
           challengeId: sc.challengeId,
           accepted: true

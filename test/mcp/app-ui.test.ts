@@ -35,9 +35,9 @@ describe("buildAppHtml", () => {
     expect(html).toContain("pending");
   });
 
-  it("calls x428/attest tool on accept", () => {
+  it("calls x428-attest tool on accept", () => {
     const html = buildAppHtml();
-    expect(html).toContain("x428/attest");
+    expect(html).toContain("x428-attest");
   });
 
   it("renders precondition types: tos, age, identity", () => {

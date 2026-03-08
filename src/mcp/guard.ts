@@ -191,7 +191,7 @@ function ensureResourceRegistered(server: McpServerWithInit): void {
 }
 
 /**
- * Register the x428/attest tool (once per server).
+ * Register the x428-attest tool (once per server).
  * This tool is called by the MCP App UI to confirm precondition acceptance.
  */
 function ensureAttestToolRegistered(
@@ -257,7 +257,7 @@ function ensureAttestToolRegistered(
   // Register with visibility: ["app"] if registerTool available (hides from model)
   if (server.registerTool) {
     server.registerTool(
-      "x428/attest",
+      "x428-attest",
       {
         description: "x428 attestation endpoint",
         inputSchema: { challengeId: z.string(), accepted: z.boolean() },
@@ -267,7 +267,7 @@ function ensureAttestToolRegistered(
     );
   } else {
     server.tool(
-      "x428/attest",
+      "x428-attest",
       "x428 attestation endpoint",
       { challengeId: z.string(), accepted: z.boolean() },
       attestHandler,
@@ -387,7 +387,7 @@ export function x428Guard(
       };
     }
 
-    // The host renders the iframe; the App calls x428/attest on acceptance.
+    // The host renders the iframe; the App calls x428-attest on acceptance.
     state.pendingChallenges.set(sessionId, challenge);
 
     return {

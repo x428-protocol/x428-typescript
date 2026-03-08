@@ -274,7 +274,7 @@ describe("x428Guard — MCP Apps mode", () => {
     expect(config?._meta?.["ui/resourceUri"]).toBe("ui://x428/guard");
   });
 
-  it("registers ui resource and x428/attest tool eagerly", () => {
+  it("registers ui resource and x428-attest tool eagerly", () => {
     const mcpServer = createMockMcpServer();
     const handler = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "result" }] });
 
@@ -285,7 +285,7 @@ describe("x428Guard — MCP Apps mode", () => {
     }, "search", {}, handler);
 
     // Both registered eagerly (not deferred to first call)
-    expect(mcpServer._tools.has("x428/attest")).toBe(true);
+    expect(mcpServer._tools.has("x428-attest")).toBe(true);
     expect(mcpServer._resources.has("ui://x428/guard")).toBe(true);
   });
 
@@ -308,7 +308,7 @@ describe("x428Guard — MCP Apps mode", () => {
     expect(handler).not.toHaveBeenCalled();
   });
 
-  it("x428/attest caches token, second call executes handler", async () => {
+  it("x428-attest caches token, second call executes handler", async () => {
     const mcpServer = createMockMcpServer();
     const handler = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "result" }] });
 
@@ -323,14 +323,14 @@ describe("x428Guard — MCP Apps mode", () => {
     // First call → pending
     await mcpServer.callTool("search", {}, extra);
     // Accept attestation
-    await mcpServer.callTool("x428/attest", { challengeId: "s1", accepted: true }, extra);
+    await mcpServer.callTool("x428-attest", { challengeId: "s1", accepted: true }, extra);
     // Second call → handler executes
     const result = await mcpServer.callTool("search", { q: "hi" }, extra);
     expect(handler).toHaveBeenCalledOnce();
     expect(result.content[0].text).toBe("result");
   });
 
-  it("x428/attest returns error when declined", async () => {
+  it("x428-attest returns error when declined", async () => {
     const mcpServer = createMockMcpServer();
     const handler = vi.fn();
 
@@ -343,7 +343,7 @@ describe("x428Guard — MCP Apps mode", () => {
     await mcpServer.simulateInitialize();
     const extra = mockExtra("s2");
     await mcpServer.callTool("search", {}, extra);
-    const result = await mcpServer.callTool("x428/attest", { challengeId: "s2", accepted: false }, extra);
+    const result = await mcpServer.callTool("x428-attest", { challengeId: "s2", accepted: false }, extra);
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain("declined");
   });

@@ -134,4 +134,4 @@ x428Guard(
 // Connect via stdio
 const transport = new StdioServerTransport();
 await server.connect(transport);
-log("Connected via stdio, tools registered: search, lookup, info, x428/attest");
+log("Connected via stdio, tools registered: search, lookup, info, x428-attest");
