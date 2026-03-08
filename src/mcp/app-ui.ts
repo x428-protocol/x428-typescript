@@ -125,10 +125,18 @@ export function buildAppHtml(): string {
 <div class="container" id="root">
   <div class="status">Waiting for tool result...</div>
 </div>
+<pre id="debug" style="font-size:10px;color:#999;margin-top:12px;max-height:200px;overflow:auto;white-space:pre-wrap;"></pre>
 
 <script>
 (function() {
   "use strict";
+
+  // --- Debug helper (renders in iframe) ---
+  function debugLog(msg) {
+    console.log("[x428-app] " + msg);
+    var el = document.getElementById("debug");
+    if (el) el.textContent += msg + "\\n";
+  }
 
   // --- Minimal postMessage JSON-RPC client ---
   let requestId = 0;
@@ -138,6 +146,7 @@ export function buildAppHtml(): string {
 
   function sendRpc(method, params) {
     const id = ++requestId;
+    debugLog("sendRpc: " + method + " id=" + id);
     return new Promise((resolve, reject) => {
       pending.set(id, { resolve, reject });
       window.parent.postMessage({ jsonrpc: "2.0", id, method, params }, "*");
@@ -150,41 +159,57 @@ export function buildAppHtml(): string {
 
   window.addEventListener("message", (event) => {
     const msg = event.data;
-    if (!msg || msg.jsonrpc !== "2.0") return;
+    if (!msg) return;
+    debugLog("msg received: " + JSON.stringify(msg).substring(0, 200));
+    if (msg.jsonrpc !== "2.0") return;
 
     // Response to our request
     if (msg.id != null && pending.has(msg.id)) {
       const { resolve, reject } = pending.get(msg.id);
       pending.delete(msg.id);
-      if (msg.error) reject(new Error(msg.error.message || "RPC error"));
-      else resolve(msg.result);
+      if (msg.error) {
+        debugLog("RPC error: " + JSON.stringify(msg.error));
+        reject(new Error(msg.error.message || "RPC error"));
+      } else {
+        debugLog("RPC result for id=" + msg.id + ": " + JSON.stringify(msg.result).substring(0, 200));
+        resolve(msg.result);
+      }
       return;
     }
 
     // Notification from host
     if (msg.method === "ui/notifications/tool-result") {
+      debugLog("got tool-result!");
       toolResultData = msg.params;
       handleToolResult(msg.params);
     } else if (msg.method === "ui/notifications/host-context-changed") {
+      debugLog("got host-context-changed");
       hostContext = { ...hostContext, ...msg.params };
       applyTheme();
     } else if (msg.method === "ui/notifications/tool-cancelled") {
       showStatus("Tool call cancelled.", "error");
+    } else {
+      debugLog("unhandled method: " + msg.method);
     }
   });
 
   // --- Initialize ---
   async function init() {
+    debugLog("init starting...");
     try {
       const result = await sendRpc("ui/initialize", {
         appInfo: { name: "x428-guard", version: "0.1.0" },
         appCapabilities: {},
         protocolVersion: "2025-11-21"
       });
+      debugLog("init success: " + JSON.stringify(result).substring(0, 200));
       hostContext = result.hostContext || {};
       applyTheme();
+      // Tell host we're ready — host waits for this before sending tool-result
+      sendNotification("ui/notifications/initialized", {});
+      debugLog("sent initialized notification");
     } catch (e) {
-      console.error("Init failed:", e);
+      debugLog("init FAILED: " + e.message);
     }
   }
 
@@ -239,6 +264,7 @@ export function buildAppHtml(): string {
   }
 
   async function onAccept(sc) {
+    debugLog("onAccept called, challengeId=" + sc.challengeId);
     const acceptBtn = document.getElementById("btn-accept");
     const declineBtn = document.getElementById("btn-decline");
     if (acceptBtn) { acceptBtn.disabled = true; acceptBtn.innerHTML = '<span class="spinner"></span>Confirming...'; }
@@ -246,6 +272,7 @@ export function buildAppHtml(): string {
 
     try {
       // Call the hidden x428/attest tool to build + verify attestation
+      debugLog("calling x428/attest...");
       const attestResult = await sendRpc("tools/call", {
         name: "x428/attest",
         arguments: {
@@ -253,6 +280,7 @@ export function buildAppHtml(): string {
           accepted: true
         }
       });
+      debugLog("attest result: " + JSON.stringify(attestResult).substring(0, 300));
 
       if (attestResult.isError) {
         showStatus("Attestation failed: " + (attestResult.content?.[0]?.text || "Unknown error"), "error");
@@ -260,15 +288,18 @@ export function buildAppHtml(): string {
       }
 
       // Re-call the original tool — token is now cached
+      debugLog("re-calling " + sc.toolName + "...");
       const toolResult = await sendRpc("tools/call", {
         name: sc.toolName,
         arguments: sc.toolArgs || {}
       });
+      debugLog("tool result: " + JSON.stringify(toolResult).substring(0, 300));
 
       // Show success and the tool result
       const text = toolResult.content?.find(c => c.type === "text")?.text || "Accepted.";
       showStatus(text, "accepted");
     } catch (e) {
+      debugLog("onAccept error: " + e.message);
       showStatus("Error: " + e.message, "error");
     }
   }

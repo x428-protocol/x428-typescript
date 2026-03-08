@@ -15,6 +15,7 @@ import { InMemoryNonceStore } from "../core/nonce.js";
 import { buildCombinedElicitation } from "./elicitation.js";
 import { createEphemeralDid } from "./ephemeral-did.js";
 import { buildAppHtml } from "./app-ui.js";
+import { z } from "zod";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -231,7 +232,7 @@ function ensureAttestToolRegistered(
       "x428/attest",
       {
         description: "x428 attestation endpoint",
-        inputSchema: { challengeId: { type: "string" }, accepted: { type: "boolean" } },
+        inputSchema: { challengeId: z.string(), accepted: z.boolean() },
         _meta: { ui: { resourceUri: UI_RESOURCE_URI, visibility: ["app"] }, "ui/resourceUri": UI_RESOURCE_URI },
       },
       attestHandler,
@@ -240,7 +241,7 @@ function ensureAttestToolRegistered(
     server.tool(
       "x428/attest",
       "x428 attestation endpoint",
-      { challengeId: { type: "string" }, accepted: { type: "boolean" } },
+      { challengeId: z.string(), accepted: z.boolean() },
       attestHandler,
     );
   }
