@@ -64,13 +64,14 @@ export interface McpServerWithInit {
   tool(...args: any[]): any;
   /** registerTool supports _meta in tool definitions (required for MCP Apps). */
   registerTool?(name: string, config: Record<string, unknown>, cb: Function): any;
+  /** registerResource supports mimeType config. */
+  registerResource?(name: string, uri: string, config: Record<string, unknown>, cb: Function): any;
   resource?(...args: any[]): any;
 }
 
 // UI resource URI shared by all guarded tools
 const UI_RESOURCE_URI = "ui://x428/guard";
 const RESOURCE_MIME_TYPE = "text/html;profile=mcp-app";
-const EXTENSION_ID = "io.modelcontextprotocol/ui";
 
 // ---------------------------------------------------------------------------
 // Shared attestation helpers
@@ -106,96 +107,63 @@ async function processAttestation(
   return verifyAttestation(challenge, payload, resolver, nonceStore, undefined, tokenTtl);
 }
 
-// Per-server state for MCP Apps mode
-interface AppsState {
-  supportsApps: boolean | null; // null = not yet detected
+// Per-server shared state
+interface ServerState {
   pendingChallenges: Map<string, PreconditionChallenge>;
   attestToolRegistered: boolean;
   resourceRegistered: boolean;
-  rawExtensions: Record<string, unknown> | null; // captured before Zod strips them
-  messageIntercepted: boolean;
 }
 
-const serverAppsState = new WeakMap<McpServerWithInit, AppsState>();
+const serverStateMap = new WeakMap<McpServerWithInit, ServerState>();
 
-function getAppsState(server: McpServerWithInit): AppsState {
-  let state = serverAppsState.get(server);
+function getServerState(server: McpServerWithInit): ServerState {
+  let state = serverStateMap.get(server);
   if (!state) {
     state = {
-      supportsApps: null,
       pendingChallenges: new Map(),
       attestToolRegistered: false,
       resourceRegistered: false,
-      rawExtensions: null,
-      messageIntercepted: false,
     };
-    serverAppsState.set(server, state);
+    serverStateMap.set(server, state);
   }
   return state;
 }
 
 /**
- * Intercept the low-level server's _onrequest to capture raw `extensions`
- * from the `initialize` request before Zod parsing strips them.
- *
- * The MCP SDK's ClientCapabilitiesSchema uses z.object() without .passthrough(),
- * which strips unknown keys including `extensions` (pending SEP-1724).
- * The SDK's connect() inlines message dispatch (no _onmessage method),
- * but _onrequest receives the raw JSON-RPC request before handler-level
- * Zod parsing strips unknown fields.
+ * Register the shared UI resource (once per server).
+ * Uses registerResource if available, falls back to resource().
  */
-function installMessageInterceptor(server: McpServerWithInit): void {
-  const state = getAppsState(server);
-  if (state.messageIntercepted) return;
-  state.messageIntercepted = true;
+function ensureResourceRegistered(server: McpServerWithInit): void {
+  const state = getServerState(server);
+  if (state.resourceRegistered) return;
+  state.resourceRegistered = true;
 
-  const lowLevel = server.server as any;
-  const original = lowLevel._onrequest;
-  if (typeof original !== "function") return;
-
-  lowLevel._onrequest = function (request: any, extra: any) {
-    if (
-      request?.method === "initialize" &&
-      request?.params?.capabilities?.extensions
-    ) {
-      state.rawExtensions = request.params.capabilities.extensions;
-      console.error(`[x428] Captured raw extensions from initialize:`, JSON.stringify(state.rawExtensions));
-    }
-    return original.call(this, request, extra);
-  };
-}
-
-function detectAppsSupport(server: McpServerWithInit): boolean {
-  const state = getAppsState(server);
-  if (state.supportsApps !== null) return state.supportsApps;
-
-  // Check raw extensions captured via message interceptor (preferred — survives Zod stripping)
-  const extensions = state.rawExtensions ?? (server.server.getClientCapabilities?.() as any)?.extensions;
-  const uiCap = extensions?.[EXTENSION_ID];
-  state.supportsApps = !!(uiCap?.mimeTypes?.includes(RESOURCE_MIME_TYPE));
-  console.error(`[x428] MCP Apps support detected: ${state.supportsApps}`);
-  return state.supportsApps;
+  if (server.registerResource) {
+    server.registerResource(
+      "x428-guard-ui",
+      UI_RESOURCE_URI,
+      { mimeType: RESOURCE_MIME_TYPE },
+      async () => ({
+        contents: [{ uri: UI_RESOURCE_URI, mimeType: RESOURCE_MIME_TYPE, text: buildAppHtml() }],
+      }),
+    );
+  } else if (server.resource) {
+    server.resource(
+      "x428-guard-ui",
+      UI_RESOURCE_URI,
+      { mimeType: RESOURCE_MIME_TYPE },
+      async () => ({
+        contents: [{ uri: UI_RESOURCE_URI, mimeType: RESOURCE_MIME_TYPE, text: buildAppHtml() }],
+      }),
+    );
+  }
 }
 
 /**
- * Register the shared UI resource eagerly (once per server).
- * Must be available before tools/list so Inspector can fetch it.
+ * Register the x428/attest tool (once per server).
+ * This tool is called by the MCP App UI to confirm precondition acceptance.
  */
-function ensureResourceRegistered(server: McpServerWithInit): void {
-  const state = getAppsState(server);
-  if (state.resourceRegistered || !server.resource) return;
-  state.resourceRegistered = true;
-  server.resource(
-    "x428-guard-ui",
-    UI_RESOURCE_URI,
-    { mimeType: RESOURCE_MIME_TYPE },
-    async () => ({
-      contents: [{ uri: UI_RESOURCE_URI, mimeType: RESOURCE_MIME_TYPE, text: buildAppHtml() }],
-    }),
-  );
-}
-
-function ensureAppsInfrastructure(
+function ensureAttestToolRegistered(
   server: McpServerWithInit,
   pendingChallenges: Map<string, PreconditionChallenge>,
   operatorDid: string,
@@ -206,76 +174,90 @@ function ensureAppsInfrastructure(
   tokenCache: Map<string, AttestationToken>,
   resourceUri: string,
 ): void {
-  const state = getAppsState(server);
+  const state = getServerState(server);
+  if (state.attestToolRegistered) return;
+  state.attestToolRegistered = true;
 
-  // Resource is registered eagerly by ensureResourceRegistered() — no need to re-register here.
+  const attestHandler = async (args: { challengeId: string; accepted: boolean }, extra: McpToolExtra) => {
+    const sessionId = extra.sessionId ?? "_default";
 
-  // Register the hidden x428/attest tool (once per server)
-  if (!state.attestToolRegistered) {
-    state.attestToolRegistered = true;
+    if (!args.accepted) {
+      return {
+        content: [{ type: "text", text: "x428: User declined preconditions." }],
+        isError: true,
+      };
+    }
+
+    const challenge = pendingChallenges.get(args.challengeId ?? sessionId);
+    if (!challenge) {
+      return {
+        content: [{ type: "text", text: "x428: No pending challenge found." }],
+        isError: true,
+      };
+    }
+
+    try {
+      const result = await processAttestation(
+        challenge, operatorDid, privateKey, resolver, nonceStore, tokenTtl,
+      );
+
+      if (result instanceof X428Error) {
+        return {
+          content: [{ type: "text", text: `x428: Attestation failed: ${result.detail}` }],
+          isError: true,
+        };
+      }
+
+      const cacheKey = `${sessionId}:${resourceUri}`;
+      tokenCache.set(cacheKey, result);
+      pendingChallenges.delete(args.challengeId ?? sessionId);
+
+      return {
+        content: [{ type: "text", text: "x428: Attestation accepted. You may now use the tool." }],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `x428: Attestation error: ${err}` }],
+        isError: true,
+      };
+    }
+  };
+
+  // Register with visibility: ["app"] if registerTool available (hides from model)
+  if (server.registerTool) {
+    server.registerTool(
+      "x428/attest",
+      {
+        description: "x428 attestation endpoint",
+        inputSchema: { challengeId: { type: "string" }, accepted: { type: "boolean" } },
+        _meta: { ui: { resourceUri: UI_RESOURCE_URI, visibility: ["app"] } },
+      },
+      attestHandler,
+    );
+  } else {
     server.tool(
       "x428/attest",
-      "x428 attestation endpoint (app-only)",
+      "x428 attestation endpoint",
       { challengeId: { type: "string" }, accepted: { type: "boolean" } },
-      async (args: { challengeId: string; accepted: boolean }, extra: McpToolExtra) => {
-        const sessionId = extra.sessionId ?? "_default";
-
-        if (!args.accepted) {
-          return {
-            content: [{ type: "text", text: "x428: User declined preconditions." }],
-            isError: true,
-          };
-        }
-
-        const challenge = state.pendingChallenges.get(args.challengeId ?? sessionId);
-        if (!challenge) {
-          return {
-            content: [{ type: "text", text: "x428: No pending challenge found." }],
-            isError: true,
-          };
-        }
-
-        try {
-          const result = await processAttestation(
-            challenge, operatorDid, privateKey, resolver, nonceStore, tokenTtl,
-          );
-
-          if (result instanceof X428Error) {
-            return {
-              content: [{ type: "text", text: `x428: Attestation failed: ${result.detail}` }],
-              isError: true,
-            };
-          }
-
-          const cacheKey = `${sessionId}:${resourceUri}`;
-          tokenCache.set(cacheKey, result);
-          state.pendingChallenges.delete(args.challengeId ?? sessionId);
-
-          return {
-            content: [{ type: "text", text: "x428: Attestation accepted. You may now use the tool." }],
-          };
-        } catch (err) {
-          return {
-            content: [{ type: "text", text: `x428: Attestation error: ${err}` }],
-            isError: true,
-          };
-        }
-      },
+      attestHandler,
     );
   }
 }
 
 // ---------------------------------------------------------------------------
-// x428Guard — unified guard with MCP Apps auto-detect
+// x428Guard — MCP Apps guard
 // ---------------------------------------------------------------------------
 
 /**
- * Register a single MCP tool with x428 precondition enforcement.
+ * Register a single MCP tool with x428 precondition enforcement via MCP Apps.
  *
- * Registers the tool immediately. On first call, detects client capabilities:
- * - If MCP Apps supported → returns `structuredContent` with pending status,
- *   registers shared `ui://x428/guard` resource and hidden `x428/attest` tool.
- * - Otherwise → uses `elicitInput()` for confirmation (existing behavior).
+ * Tools are registered with `_meta.ui.resourceUri` so MCP Apps-capable hosts
+ * (Inspector, Claude Desktop) render an inline acceptance UI. The tool returns
+ * `structuredContent` with precondition data for the App, plus text `content`
+ * as fallback for the model context.
+ *
+ * The host decides whether to render the App UI — no runtime capability
+ * detection is needed.
  */
 export function x428Guard(
   mcpServer: McpServerWithInit,
@@ -290,14 +272,14 @@ export function x428Guard(
   const nonceStore = config.nonceStore ?? new InMemoryNonceStore();
   const resourceUri = config.resourceUri ?? `x428://mcp/tool/${toolName}`;
   const { did: operatorDid, privateKey } = createEphemeralDid();
-  const elicitServer = config.server ?? (mcpServer.server as unknown as McpServerLike);
+  const state = getServerState(mcpServer);
 
-  // Install interceptor to capture raw extensions before Zod strips them
-  installMessageInterceptor(mcpServer);
-
-  // Eagerly register the shared UI resource (once per server) so it's available
-  // when Inspector sees _meta.ui.resourceUri in tools/list and tries to fetch it
+  // Eagerly register shared infrastructure
   ensureResourceRegistered(mcpServer);
+  ensureAttestToolRegistered(
+    mcpServer, state.pendingChallenges,
+    operatorDid, privateKey, resolver, nonceStore, tokenTtl, tokenCache, resourceUri,
+  );
 
   function getCachedToken(sessionId: string): AttestationToken | undefined {
     const key = `${sessionId}:${resourceUri}`;
@@ -311,43 +293,8 @@ export function x428Guard(
     const cached = getCachedToken(sessionId);
     if (cached) return handler(args, extra);
 
-    // Lazy capability detection on first uncached call
-    const supportsApps = detectAppsSupport(mcpServer);
-
-    if (supportsApps) {
-      return handleAppsPath(args, extra, sessionId);
-    } else {
-      return handleElicitationPath(args, extra, sessionId);
-    }
-  };
-
-  // Use registerTool() if available (supports _meta for MCP Apps tool definitions),
-  // fall back to tool() for compatibility with minimal McpServer implementations.
-  if (mcpServer.registerTool) {
-    mcpServer.registerTool(toolName, {
-      ...(toolConfig.description ? { description: toolConfig.description } : {}),
-      ...(toolConfig.inputSchema ? { inputSchema: toolConfig.inputSchema } : {}),
-      _meta: { ui: { resourceUri: UI_RESOURCE_URI } },
-    }, toolCallback);
-  } else {
-    const toolArgs: any[] = [toolName];
-    if (toolConfig.description) toolArgs.push(toolConfig.description);
-    if (toolConfig.inputSchema) toolArgs.push(toolConfig.inputSchema);
-    toolArgs.push(toolCallback);
-    mcpServer.tool(...toolArgs);
-  }
-
-  // --- MCP Apps path ---
-  function handleAppsPath(args: any, extra: McpToolExtra, sessionId: string): any {
-    const state = getAppsState(mcpServer);
-
-    // Ensure resource + attest tool are registered (lazy, once)
-    ensureAppsInfrastructure(
-      mcpServer, state.pendingChallenges,
-      operatorDid, privateKey, resolver, nonceStore, tokenTtl, tokenCache, resourceUri,
-    );
-
-    // Generate challenge and return pending structuredContent
+    // Generate challenge and return structuredContent for the App UI.
+    // The host renders the App iframe; the App calls x428/attest on acceptance.
     const challenge = generateChallenge(config.preconditions, resourceUri, { ttlSeconds: 300 });
     state.pendingChallenges.set(sessionId, challenge);
 
@@ -366,77 +313,34 @@ export function x428Guard(
       },
       _meta: { ui: { resourceUri: UI_RESOURCE_URI } },
     };
-  }
+  };
 
-  // --- Elicitation fallback path ---
-  async function handleElicitationPath(args: any, extra: McpToolExtra, sessionId: string): Promise<any> {
-    const challenge = generateChallenge(config.preconditions, resourceUri, { ttlSeconds: 300 });
-    const preconditions = challenge.preconditions as PreconditionObject[];
-    const elicitReq = buildCombinedElicitation(preconditions);
-
-    let elicitResult: { action: string; content?: Record<string, unknown> };
-    try {
-      elicitResult = await elicitServer.elicitInput(elicitReq, { requestId: extra.requestId });
-    } catch (err) {
-      return {
-        content: [{ type: "text", text: `x428: Elicitation failed: ${err}` }],
-        isError: true,
-      };
-    }
-
-    if (elicitResult.action !== "accept") {
-      return {
-        content: [{ type: "text", text: "x428: User declined precondition(s)." }],
-        isError: true,
-      };
-    }
-
-    for (const precondition of preconditions) {
-      const fieldKey = `confirm_${precondition.id}`;
-      const confirmed = elicitResult.content?.[fieldKey]
-        ?? (preconditions.length === 1 && (elicitResult.content?.accept ?? elicitResult.content?.confirm));
-
-      if (!confirmed) {
-        return {
-          content: [{ type: "text", text: `x428: User did not confirm ${precondition.type} precondition.` }],
-          isError: true,
-        };
-      }
-    }
-
-    try {
-      const result = await processAttestation(
-        challenge, operatorDid, privateKey, resolver, nonceStore, tokenTtl,
-      );
-
-      if (result instanceof X428Error) {
-        return {
-          content: [{ type: "text", text: `x428: Attestation verification failed: ${result.detail}` }],
-          isError: true,
-        };
-      }
-
-      tokenCache.set(`${sessionId}:${resourceUri}`, result);
-      return handler(args, extra);
-    } catch (err) {
-      return {
-        content: [{ type: "text", text: `x428: Attestation error: ${err}` }],
-        isError: true,
-      };
-    }
+  // Use registerTool for _meta.ui support, fall back to tool() for compat
+  if (mcpServer.registerTool) {
+    mcpServer.registerTool(toolName, {
+      ...(toolConfig.description ? { description: toolConfig.description } : {}),
+      ...(toolConfig.inputSchema ? { inputSchema: toolConfig.inputSchema } : {}),
+      _meta: { ui: { resourceUri: UI_RESOURCE_URI } },
+    }, toolCallback);
+  } else {
+    const toolArgs: any[] = [toolName];
+    if (toolConfig.description) toolArgs.push(toolConfig.description);
+    if (toolConfig.inputSchema) toolArgs.push(toolConfig.inputSchema);
+    toolArgs.push(toolCallback);
+    mcpServer.tool(...toolArgs);
   }
 }
 
 // ---------------------------------------------------------------------------
-// x428GuardElicitation — backward-compatible wrapper (elicitation only)
+// x428GuardElicitation — elicitation-only guard (non-Apps clients)
 // ---------------------------------------------------------------------------
 
 /**
  * Wrap a tool handler with x428 precondition enforcement using elicitation.
  *
- * This is the original x428Guard API — returns a wrapped handler function.
- * Does NOT support MCP Apps auto-detection. Use `x428Guard()` or
- * `x428Protect()` for auto-detection.
+ * This is for MCP clients that don't support MCP Apps. Returns a wrapped
+ * handler function that uses `elicitInput()` for confirmation dialogs.
+ * Use `x428Guard()` for MCP Apps-capable clients.
  */
 export function x428GuardElicitation<TArgs, TResult>(
   config: X428Config & { server: McpServerLike },
