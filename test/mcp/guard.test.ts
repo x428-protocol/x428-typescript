@@ -146,11 +146,20 @@ describe("x428Guard", () => {
     expect(server.elicitInput).toHaveBeenCalledTimes(2);
   });
 
-  it("handles TOS + AGE multi-precondition", async () => {
-    const server = mockServer([
-      { action: "accept", content: { accept: true } },
-      { action: "accept", content: { confirm: true } },
-    ]);
+  it("handles TOS + AGE multi-precondition in single elicitation", async () => {
+    // The guard combines all preconditions into a single form with confirm_<id> keys.
+    // Mock server accepts and returns all fields as true (keyed dynamically).
+    const server: McpServerLike = {
+      elicitInput: vi.fn(async (params) => {
+        // Accept all fields in the requestedSchema
+        const schema = params.requestedSchema as { required?: string[] };
+        const content: Record<string, unknown> = {};
+        for (const key of schema.required ?? []) {
+          content[key] = true;
+        }
+        return { action: "accept", content };
+      }),
+    };
     const innerHandler = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "OK" }] });
     const guarded = x428Guard(
       {
@@ -170,7 +179,8 @@ describe("x428Guard", () => {
 
     const extra = mockExtra("session-5");
     await guarded({}, extra);
-    expect(server.elicitInput).toHaveBeenCalledTimes(2);
+    // Single combined elicitation call
+    expect(server.elicitInput).toHaveBeenCalledTimes(1);
     expect(innerHandler).toHaveBeenCalledOnce();
   });
 });

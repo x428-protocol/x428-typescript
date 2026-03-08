@@ -46,3 +46,62 @@ export function buildElicitation(precondition: PreconditionObject): ElicitationR
       };
   }
 }
+
+/**
+ * Build a single combined elicitation form for multiple preconditions.
+ * Each precondition gets a uniquely-keyed boolean field to avoid collisions.
+ */
+export function buildCombinedElicitation(preconditions: PreconditionObject[]): ElicitationRequest {
+  if (preconditions.length === 1) {
+    return buildElicitation(preconditions[0]);
+  }
+
+  const messageParts: string[] = [];
+  const properties: Record<string, unknown> = {};
+  const required: string[] = [];
+
+  for (const precondition of preconditions) {
+    const fieldKey = `confirm_${precondition.id}`;
+    required.push(fieldKey);
+
+    switch (precondition.type) {
+      case "tos":
+        messageParts.push(
+          `- Terms of Service: Review at ${precondition.documentUrl} (v${precondition.tosVersion})`,
+        );
+        properties[fieldKey] = {
+          type: "boolean",
+          title: "I accept the Terms of Service",
+        };
+        break;
+      case "age":
+        messageParts.push(
+          `- Age Verification: You must be ${precondition.minimumAge} or older`,
+        );
+        properties[fieldKey] = {
+          type: "boolean",
+          title: `I confirm I am ${precondition.minimumAge} or older`,
+        };
+        break;
+      case "identity":
+        messageParts.push(
+          `- Identity: Please confirm your identity`,
+        );
+        properties[fieldKey] = {
+          type: "boolean",
+          title: "I confirm my identity",
+        };
+        break;
+    }
+  }
+
+  return {
+    mode: "form",
+    message: `Precondition Acceptance Required\n\nPlease review and confirm the following:\n\n${messageParts.join("\n")}`,
+    requestedSchema: {
+      type: "object",
+      properties,
+      required,
+    },
+  };
+}

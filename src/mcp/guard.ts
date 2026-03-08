@@ -7,8 +7,8 @@ import type { DidResolver } from "../core/did.js";
 import { DidKeyResolver } from "../core/did.js";
 import type { NonceStore } from "../core/nonce.js";
 import { InMemoryNonceStore } from "../core/nonce.js";
-import { buildElicitation } from "./elicitation.js";
-import { ed25519 } from "@noble/curves/ed25519.js";
+import { buildCombinedElicitation } from "./elicitation.js";
+import { createEphemeralDid } from "./ephemeral-did.js";
 
 /**
  * Minimal interface for the MCP server object.
@@ -56,31 +56,7 @@ export function x428Guard<TArgs, TResult>(
   const nonceStore = config.nonceStore ?? new InMemoryNonceStore();
 
   // Generate an ephemeral keypair for self-attestation within the guard
-  const privateKey = new Uint8Array(32);
-  crypto.getRandomValues(privateKey);
-  const publicKey = ed25519.getPublicKey(privateKey);
-
-  // Build a did:key from the ephemeral public key
-  const multicodecBytes = new Uint8Array(2 + publicKey.length);
-  multicodecBytes[0] = 0xed;
-  multicodecBytes[1] = 0x01;
-  multicodecBytes.set(publicKey, 2);
-
-  const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-  let num = 0n;
-  for (const byte of multicodecBytes) {
-    num = num * 256n + BigInt(byte);
-  }
-  let encoded = "";
-  while (num > 0n) {
-    encoded = BASE58_ALPHABET[Number(num % 58n)] + encoded;
-    num = num / 58n;
-  }
-  for (const byte of multicodecBytes) {
-    if (byte === 0) encoded = "1" + encoded;
-    else break;
-  }
-  const operatorDid = `did:key:z${encoded}`;
+  const { did: operatorDid, privateKey } = createEphemeralDid();
 
   return async (args: TArgs, extra: McpToolExtra) => {
     const resourceUri = config.resourceUri ?? `x428://mcp/tool`;
@@ -95,22 +71,42 @@ export function x428Guard<TArgs, TResult>(
 
     // Generate challenge
     const challenge = generateChallenge(config.preconditions, resourceUri, { ttlSeconds: 300 });
+    console.error(`[x428] Generated challenge with ${challenge.preconditions.length} preconditions`);
 
-    // Elicit user confirmation for each precondition
+    // Elicit user confirmation for all preconditions in a single form
+    // (MCP clients may not support multiple sequential elicitations)
+    const preconditions = challenge.preconditions as PreconditionObject[];
+    const elicitReq = buildCombinedElicitation(preconditions);
+    console.error(`[x428] Eliciting ${preconditions.length} precondition(s) in single form`);
+
+    let elicitResult: { action: string; content?: Record<string, unknown> };
+    try {
+      elicitResult = await config.server.elicitInput(elicitReq, { requestId: extra.requestId });
+    } catch (err) {
+      console.error(`[x428] elicitInput threw:`, err);
+      return {
+        content: [{ type: "text", text: `x428: Elicitation failed: ${err}` }],
+        isError: true,
+      } as unknown as TResult;
+    }
+
+    console.error(`[x428] Elicitation result: ${JSON.stringify(elicitResult)}`);
+
+    if (elicitResult.action !== "accept") {
+      return {
+        content: [{ type: "text", text: `x428: User declined precondition(s).` }],
+        isError: true,
+      } as unknown as TResult;
+    }
+
+    // Verify each precondition was confirmed
     const attestations: AttestationObject[] = [];
+    for (const precondition of preconditions) {
+      // For single-precondition forms, check legacy keys too
+      const fieldKey = `confirm_${precondition.id}`;
+      const confirmed = elicitResult.content?.[fieldKey]
+        ?? (preconditions.length === 1 && (elicitResult.content?.accept ?? elicitResult.content?.confirm));
 
-    for (const precondition of challenge.preconditions) {
-      const elicitReq = buildElicitation(precondition as PreconditionObject);
-      const result = await config.server.elicitInput(elicitReq, { requestId: extra.requestId });
-
-      if (result.action !== "accept") {
-        return {
-          content: [{ type: "text", text: `x428: User declined ${precondition.type} precondition.` }],
-          isError: true,
-        } as unknown as TResult;
-      }
-
-      const confirmed = result.content?.accept ?? result.content?.confirm;
       if (!confirmed) {
         return {
           content: [{ type: "text", text: `x428: User did not confirm ${precondition.type} precondition.` }],
@@ -145,18 +141,40 @@ export function x428Guard<TArgs, TResult>(
       }
     }
 
+    console.error(`[x428] All ${attestations.length} preconditions confirmed, building attestation`);
+
     // Build attestation through the core pipeline
-    const payload = buildAttestation(challenge, operatorDid, privateKey, attestations);
+    let payload;
+    try {
+      payload = buildAttestation(challenge, operatorDid, privateKey, attestations);
+      console.error(`[x428] Attestation built successfully`);
+    } catch (err) {
+      console.error(`[x428] buildAttestation threw:`, err);
+      return {
+        content: [{ type: "text", text: `x428: Failed to build attestation: ${err}` }],
+        isError: true,
+      } as unknown as TResult;
+    }
 
     // Verify through the core pipeline
-    const verifyResult = await verifyAttestation(
-      challenge,
-      payload,
-      resolver,
-      nonceStore,
-      undefined,
-      tokenTtl,
-    );
+    let verifyResult;
+    try {
+      verifyResult = await verifyAttestation(
+        challenge,
+        payload,
+        resolver,
+        nonceStore,
+        undefined,
+        tokenTtl,
+      );
+      console.error(`[x428] Verification result: ${verifyResult instanceof X428Error ? `ERROR: ${verifyResult.detail}` : "OK"}`);
+    } catch (err) {
+      console.error(`[x428] verifyAttestation threw:`, err);
+      return {
+        content: [{ type: "text", text: `x428: Verification threw: ${err}` }],
+        isError: true,
+      } as unknown as TResult;
+    }
 
     if (verifyResult instanceof X428Error) {
       return {
@@ -167,6 +185,7 @@ export function x428Guard<TArgs, TResult>(
 
     // Cache the token keyed by session
     tokenCache.set(cacheKey, verifyResult);
+    console.error(`[x428] Token cached, proceeding to handler`);
 
     return handler(args, extra);
   };
