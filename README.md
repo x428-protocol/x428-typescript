@@ -4,6 +4,24 @@ TypeScript reference implementation of the [x428 Precondition Attestation Protoc
 
 x428 extends HTTP 428 ("Precondition Required") into a challenge-response handshake for AI agents. Servers issue precondition challenges (TOS acceptance, age verification, identity attestation); clients respond with signed attestation payloads.
 
+## Development
+
+```bash
+git clone --recurse-submodules https://github.com/x428-protocol/x428-typescript.git
+cd x428-typescript
+make setup    # install deps + init submodule
+make test     # run 79 conformance + unit tests
+make typecheck
+```
+
+To pull updated conformance vectors from the spec:
+
+```bash
+make update-vectors
+make test
+git add vendor/spec && git commit -m "update spec vectors"
+```
+
 ## Quick Start — MCP Guard
 
 Gate any MCP tool behind TOS/AGE confirmation with a single wrapper:
