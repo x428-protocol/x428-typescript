@@ -256,6 +256,7 @@ describe("x428Guard — MCP Apps mode", () => {
     expect(mcpServer.registerTool).toHaveBeenCalled();
     const config = mcpServer._tools.get("search")?.config;
     expect(config?._meta?.ui?.resourceUri).toBe("ui://x428/guard");
+    expect(config?._meta?.["ui/resourceUri"]).toBe("ui://x428/guard");
   });
 
   it("registers ui resource and x428/attest tool eagerly", () => {

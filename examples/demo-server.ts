@@ -27,10 +27,14 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { x428Guard } from "../src/mcp/guard.js";
 
+const log = (...args: unknown[]) => process.stderr.write(`[x428-demo] ${args.map(String).join(" ")}\n`);
+
 const server = new McpServer({
   name: "x428-demo",
   version: "0.1.0",
 });
+
+log("Server created");
 
 // Search: requires TOS acceptance only
 x428Guard(
@@ -130,3 +134,4 @@ x428Guard(
 // Connect via stdio
 const transport = new StdioServerTransport();
 await server.connect(transport);
+log("Connected via stdio, tools registered: search, lookup, info, x428/attest");

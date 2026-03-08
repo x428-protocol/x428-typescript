@@ -72,6 +72,8 @@ export interface McpServerWithInit {
 // UI resource URI shared by all guarded tools
 const UI_RESOURCE_URI = "ui://x428/guard";
 const RESOURCE_MIME_TYPE = "text/html;profile=mcp-app";
+// ext-apps SDK uses both nested and flat key formats for _meta
+const UI_META = { ui: { resourceUri: UI_RESOURCE_URI }, "ui/resourceUri": UI_RESOURCE_URI };
 
 // ---------------------------------------------------------------------------
 // Shared attestation helpers
@@ -230,7 +232,7 @@ function ensureAttestToolRegistered(
       {
         description: "x428 attestation endpoint",
         inputSchema: { challengeId: { type: "string" }, accepted: { type: "boolean" } },
-        _meta: { ui: { resourceUri: UI_RESOURCE_URI, visibility: ["app"] } },
+        _meta: { ui: { resourceUri: UI_RESOURCE_URI, visibility: ["app"] }, "ui/resourceUri": UI_RESOURCE_URI },
       },
       attestHandler,
     );
@@ -311,7 +313,7 @@ export function x428Guard(
           ...(p.type === "age" ? { minimumAge: p.minimumAge } : {}),
         })),
       },
-      _meta: { ui: { resourceUri: UI_RESOURCE_URI } },
+      _meta: UI_META,
     };
   };
 
@@ -320,7 +322,7 @@ export function x428Guard(
     mcpServer.registerTool(toolName, {
       ...(toolConfig.description ? { description: toolConfig.description } : {}),
       ...(toolConfig.inputSchema ? { inputSchema: toolConfig.inputSchema } : {}),
-      _meta: { ui: { resourceUri: UI_RESOURCE_URI } },
+      _meta: UI_META,
     }, toolCallback);
   } else {
     const toolArgs: any[] = [toolName];
