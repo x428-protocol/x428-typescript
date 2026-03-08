@@ -32,4 +32,5 @@ export { InMemoryNonceStore } from "./core/nonce.js";
 // MCP adapter
 export { x428Guard } from "./mcp/guard.js";
 export type { X428Config } from "./mcp/guard.js";
+export { x428Protect } from "./mcp/middleware.js";
 export { buildElicitation } from "./mcp/elicitation.js";

@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { buildAttestation } from "../../src/core/attestation.js";
-import { verifyPayloadSignature, base64urlEncode } from "../../src/core/signing.js";
+import { verifyPayloadSignature } from "../../src/core/signing.js";
 import type { PreconditionChallenge, AttestationObject } from "../../src/core/types.js";
 
 describe("buildAttestation", () => {
@@ -52,15 +52,9 @@ describe("buildAttestation", () => {
   it("produces a valid signature verifiable with the corresponding public key", () => {
     const payload = buildAttestation(challenge, "did:key:z6Mktest", privateKey, attestations);
 
-    const jwk = {
-      kty: "OKP",
-      crv: "Ed25519",
-      x: base64urlEncode(publicKey),
-    };
-
     const valid = verifyPayloadSignature(
       payload as unknown as Record<string, unknown>,
-      jwk,
+      publicKey,
     );
     expect(valid).toBe(true);
   });
@@ -72,15 +66,9 @@ describe("buildAttestation", () => {
     otherKey[0] = 2;
     const otherPublicKey = ed25519.getPublicKey(otherKey);
 
-    const jwk = {
-      kty: "OKP",
-      crv: "Ed25519",
-      x: base64urlEncode(otherPublicKey),
-    };
-
     const valid = verifyPayloadSignature(
       payload as unknown as Record<string, unknown>,
-      jwk,
+      otherPublicKey,
     );
     expect(valid).toBe(false);
   });

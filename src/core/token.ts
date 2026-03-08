@@ -9,6 +9,7 @@
  */
 
 import type { AttestationToken } from "./types.js";
+import { X428Error } from "./errors.js";
 
 /**
  * Strip query string and fragment from a URI.
@@ -85,18 +86,23 @@ export function generateToken(
 /**
  * Validate a token against a requested URI and check expiry.
  *
- * Returns true if the token's scope covers the requested URI and
- * the token has not expired.
+ * Returns true if valid, or an X428Error with the specific failure reason.
  */
 export function validateToken(
   token: AttestationToken,
   requestedUri: string,
   currentTime?: Date,
-): boolean {
+): true | X428Error {
   const now = currentTime ?? new Date();
   const expiry = new Date(token.expiresAt);
 
-  if (now >= expiry) return false;
+  if (now >= expiry) {
+    return new X428Error("token_expired", "Attestation token has expired");
+  }
 
-  return scopeMatches(token.scope, requestedUri);
+  if (!scopeMatches(token.scope, requestedUri)) {
+    return new X428Error("token_scope_mismatch", `Token scope "${token.scope}" does not cover "${requestedUri}"`);
+  }
+
+  return true;
 }

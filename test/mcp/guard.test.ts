@@ -22,6 +22,7 @@ describe("x428Guard", () => {
     );
 
     const mockCtx = {
+      sessionId: "session-1",
       toolName: "test-tool",
       mcpReq: {
         elicitInput: vi.fn().mockResolvedValue({ action: "accept", content: { accept: true } }),
@@ -45,6 +46,7 @@ describe("x428Guard", () => {
     );
 
     const mockCtx = {
+      sessionId: "session-2",
       toolName: "age-gated",
       mcpReq: {
         elicitInput: vi.fn().mockResolvedValue({ action: "accept", content: { confirm: true } }),
@@ -74,6 +76,7 @@ describe("x428Guard", () => {
     );
 
     const mockCtx = {
+      sessionId: "session-3",
       toolName: "test-tool",
       mcpReq: { elicitInput: vi.fn().mockResolvedValue({ action: "decline" }) },
     };
@@ -84,7 +87,7 @@ describe("x428Guard", () => {
     expect(result.content[0].text).toContain("declined");
   });
 
-  it("caches token and skips elicitation on second call", async () => {
+  it("caches token per session and skips elicitation on second call", async () => {
     const innerHandler = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "OK" }] });
     const guarded = x428Guard(
       {
@@ -102,6 +105,7 @@ describe("x428Guard", () => {
     );
 
     const mockCtx = {
+      sessionId: "session-4",
       toolName: "test-tool",
       mcpReq: {
         elicitInput: vi.fn().mockResolvedValue({ action: "accept", content: { accept: true } }),
@@ -112,6 +116,47 @@ describe("x428Guard", () => {
     await guarded({}, mockCtx);
     expect(mockCtx.mcpReq.elicitInput).toHaveBeenCalledOnce(); // cached second time
     expect(innerHandler).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not share token cache across sessions", async () => {
+    const innerHandler = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "OK" }] });
+    const guarded = x428Guard(
+      {
+        preconditions: [
+          {
+            type: "tos",
+            tosVersion: "1.0",
+            documentUrl: "https://example.com/tos",
+            documentHash: "sha256-abc",
+            allowedAttestationMethods: ["self"],
+          },
+        ],
+      },
+      innerHandler,
+    );
+
+    const ctx1 = {
+      sessionId: "session-A",
+      toolName: "test-tool",
+      mcpReq: {
+        elicitInput: vi.fn().mockResolvedValue({ action: "accept", content: { accept: true } }),
+      },
+    };
+
+    const ctx2 = {
+      sessionId: "session-B",
+      toolName: "test-tool",
+      mcpReq: {
+        elicitInput: vi.fn().mockResolvedValue({ action: "accept", content: { accept: true } }),
+      },
+    };
+
+    await guarded({}, ctx1);
+    await guarded({}, ctx2);
+
+    // Both sessions should be elicited independently
+    expect(ctx1.mcpReq.elicitInput).toHaveBeenCalledOnce();
+    expect(ctx2.mcpReq.elicitInput).toHaveBeenCalledOnce();
   });
 
   it("handles TOS + AGE multi-precondition", async () => {
@@ -133,6 +178,7 @@ describe("x428Guard", () => {
     );
 
     const mockCtx = {
+      sessionId: "session-5",
       toolName: "gated-tool",
       mcpReq: {
         elicitInput: vi

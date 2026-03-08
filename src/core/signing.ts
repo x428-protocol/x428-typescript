@@ -35,7 +35,7 @@ export function signPayload(
 
 export function verifyPayloadSignature(
   payload: Record<string, unknown>,
-  publicKeyJwk: { kty: string; crv: string; x: string },
+  publicKeyBytes: Uint8Array,
 ): boolean {
   try {
     const { signature, ...rest } = payload;
@@ -44,10 +44,9 @@ export function verifyPayloadSignature(
     const sigBytes = base64urlDecode(signature);
     if (sigBytes.length !== 64) return false;
 
-    const publicKey = base64urlDecode(publicKeyJwk.x);
     const message = jcsCanonicalBytes(rest);
 
-    return ed25519.verify(sigBytes, message, publicKey);
+    return ed25519.verify(sigBytes, message, publicKeyBytes);
   } catch {
     return false;
   }

@@ -18,12 +18,14 @@ import type {
   AttestationPayload,
   AttestationToken,
   DidDocument,
+  DidVerificationMethod,
   PreconditionChallenge,
 } from "./types.js";
 import { X428Error } from "./errors.js";
 import type { DidResolver } from "./did.js";
+import { base58btcDecode } from "./did.js";
 import type { NonceStore } from "./nonce.js";
-import { verifyPayloadSignature } from "./signing.js";
+import { verifyPayloadSignature, base64urlDecode } from "./signing.js";
 import { generateToken } from "./token.js";
 
 /**
@@ -45,31 +47,64 @@ async function verifyVcProof(
   const issuerDoc = await resolver.resolve(issuer);
   if (!issuerDoc) return false;
 
-  const issuerKey = extractAssertionKey(issuerDoc);
-  if (!issuerKey) return false;
+  const issuerKeyBytes = extractAssertionKey(issuerDoc);
+  if (!issuerKeyBytes) return false;
 
   // Verify: construct a payload-like object from the VC (without proof)
   // and use the proofValue as the "signature"
   const { proof: _proof, ...vcWithoutProof } = vc;
   const verifyObj = { ...vcWithoutProof, signature: proof.proofValue };
-  return verifyPayloadSignature(verifyObj, issuerKey);
+  return verifyPayloadSignature(verifyObj, issuerKeyBytes);
+}
+
+const ED25519_MULTICODEC_PREFIX = new Uint8Array([0xed, 0x01]);
+
+/**
+ * Extract raw Ed25519 public key bytes from a verification method.
+ * Supports publicKeyJwk, publicKeyBase58, and publicKeyMultibase.
+ */
+function extractPublicKeyBytes(method: DidVerificationMethod): Uint8Array | null {
+  if (method.publicKeyJwk) {
+    const jwk = method.publicKeyJwk as { x?: string };
+    if (!jwk.x) return null;
+    return base64urlDecode(jwk.x);
+  }
+
+  if (method.publicKeyBase58) {
+    return base58btcDecode(method.publicKeyBase58);
+  }
+
+  if (method.publicKeyMultibase) {
+    const encoded = method.publicKeyMultibase;
+    if (!encoded.startsWith("z")) return null;
+    const decoded = base58btcDecode(encoded.slice(1));
+    // Strip multicodec prefix if present
+    if (
+      decoded.length >= 2 &&
+      decoded[0] === ED25519_MULTICODEC_PREFIX[0] &&
+      decoded[1] === ED25519_MULTICODEC_PREFIX[1]
+    ) {
+      return decoded.slice(2);
+    }
+    return decoded;
+  }
+
+  return null;
 }
 
 /**
- * Extract the first assertionMethod public key (as JWK) from a DID document.
+ * Extract the first assertionMethod public key bytes from a DID document.
  */
-function extractAssertionKey(
-  didDoc: DidDocument,
-): { kty: string; crv: string; x: string } | null {
+function extractAssertionKey(didDoc: DidDocument): Uint8Array | null {
   if (!didDoc.assertionMethod?.length) return null;
   const methodId = didDoc.assertionMethod[0];
   if (!methodId || !didDoc.verificationMethod) return null;
 
-  // assertionMethod can be a string reference or an inline object
   const id = typeof methodId === "string" ? methodId : methodId.id;
   const method = didDoc.verificationMethod.find((vm) => vm.id === id);
-  if (!method?.publicKeyJwk) return null;
-  return method.publicKeyJwk as { kty: string; crv: string; x: string };
+  if (!method) return null;
+
+  return extractPublicKeyBytes(method);
 }
 
 /**
@@ -153,8 +188,8 @@ export async function verifyAttestation(
   }
 
   // Step 8: Signature verification
-  const publicKeyJwk = extractAssertionKey(didDoc);
-  if (!publicKeyJwk) {
+  const publicKeyBytes = extractAssertionKey(didDoc);
+  if (!publicKeyBytes) {
     return new X428Error(
       "invalid_signature",
       "No assertionMethod key found in DID document",
@@ -163,7 +198,7 @@ export async function verifyAttestation(
 
   const sigValid = verifyPayloadSignature(
     payload as unknown as Record<string, unknown>,
-    publicKeyJwk,
+    publicKeyBytes,
   );
   if (!sigValid) {
     return new X428Error(
