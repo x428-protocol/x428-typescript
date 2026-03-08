@@ -31,6 +31,12 @@ import { generateToken } from "./token.js";
 /**
  * Verify a VC's DataIntegrityProof by resolving the issuer DID and
  * checking the proof signature over the VC content (with proof removed).
+ *
+ * LIMITATION: This uses JCS canonicalization instead of the spec-required
+ * RDFC-1.0 (RDF Dataset Canonicalization). It will correctly verify VCs
+ * produced by this library but NOT VCs signed by third-party issuers using
+ * proper eddsa-rdfc-2022. Full RDFC-1.0 support requires a JSON-LD processor.
+ * See: https://github.com/x428-protocol/x428-typescript/issues/1
  */
 async function verifyVcProof(
   vc: Record<string, unknown>,

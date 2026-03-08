@@ -1,4 +1,4 @@
-import type { AttestationToken, AttestationObject } from "../core/types.js";
+import type { AttestationToken, AttestationObject, PreconditionObject } from "../core/types.js";
 import { generateChallenge, type PreconditionConfig } from "../core/challenge.js";
 import { buildAttestation } from "../core/attestation.js";
 import { verifyAttestation } from "../core/verify.js";
@@ -10,8 +10,35 @@ import { InMemoryNonceStore } from "../core/nonce.js";
 import { buildElicitation } from "./elicitation.js";
 import { ed25519 } from "@noble/curves/ed25519.js";
 
+/**
+ * Minimal interface for the MCP server object.
+ * Matches `McpServer.server` from `@modelcontextprotocol/sdk`.
+ */
+export interface McpServerLike {
+  elicitInput(params: {
+    mode: string;
+    message: string;
+    requestedSchema: Record<string, unknown>;
+  }, options?: { requestId?: string | number }): Promise<{
+    action: string;
+    content?: Record<string, unknown>;
+  }>;
+}
+
+/**
+ * Minimal interface for the `extra` parameter passed to MCP tool callbacks.
+ * Matches `RequestHandlerExtra` from `@modelcontextprotocol/sdk`.
+ */
+export interface McpToolExtra {
+  sessionId?: string;
+  signal: AbortSignal;
+  requestId: string | number;
+  [key: string]: unknown;
+}
+
 export interface X428Config {
   preconditions: PreconditionConfig[];
+  server: McpServerLike;
   resourceUri?: string;
   tokenTtl?: number;
   didResolver?: DidResolver;
@@ -20,10 +47,10 @@ export interface X428Config {
 
 export function x428Guard<TArgs, TResult>(
   config: X428Config,
-  handler: (args: TArgs, ctx: any) => Promise<TResult>,
-): (args: TArgs, ctx: any) => Promise<TResult> {
+  handler: (args: TArgs, extra: McpToolExtra) => Promise<TResult>,
+): (args: TArgs, extra: McpToolExtra) => Promise<TResult> {
   const tokenTtl = config.tokenTtl ?? 3600;
-  // Per-session token cache: sessionId → token
+  // Per-session token cache: cacheKey → token
   const tokenCache = new Map<string, AttestationToken>();
   const resolver = config.didResolver ?? new DidKeyResolver();
   const nonceStore = config.nonceStore ?? new InMemoryNonceStore();
@@ -39,7 +66,6 @@ export function x428Guard<TArgs, TResult>(
   multicodecBytes[1] = 0x01;
   multicodecBytes.set(publicKey, 2);
 
-  // Base58btc encode for did:key
   const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
   let num = 0n;
   for (const byte of multicodecBytes) {
@@ -56,15 +82,15 @@ export function x428Guard<TArgs, TResult>(
   }
   const operatorDid = `did:key:z${encoded}`;
 
-  return async (args: TArgs, ctx: any) => {
-    const resourceUri = config.resourceUri ?? `x428://mcp/${ctx?.toolName ?? "unknown"}`;
-    const sessionId = ctx?.sessionId ?? ctx?.mcpReq?.sessionId ?? "_default";
+  return async (args: TArgs, extra: McpToolExtra) => {
+    const resourceUri = config.resourceUri ?? `x428://mcp/tool`;
+    const sessionId = extra.sessionId ?? "_default";
     const cacheKey = `${sessionId}:${resourceUri}`;
 
     // Check cached token
     const cached = tokenCache.get(cacheKey);
     if (cached && new Date(cached.expiresAt) > new Date()) {
-      return handler(args, ctx);
+      return handler(args, extra);
     }
 
     // Generate challenge
@@ -74,8 +100,8 @@ export function x428Guard<TArgs, TResult>(
     const attestations: AttestationObject[] = [];
 
     for (const precondition of challenge.preconditions) {
-      const elicitReq = buildElicitation(precondition);
-      const result = await ctx.mcpReq.elicitInput(elicitReq);
+      const elicitReq = buildElicitation(precondition as PreconditionObject);
+      const result = await config.server.elicitInput(elicitReq, { requestId: extra.requestId });
 
       if (result.action !== "accept") {
         return {
@@ -142,6 +168,6 @@ export function x428Guard<TArgs, TResult>(
     // Cache the token keyed by session
     tokenCache.set(cacheKey, verifyResult);
 
-    return handler(args, ctx);
+    return handler(args, extra);
   };
 }

@@ -15,7 +15,13 @@ export type { X428ErrorCode } from "./core/errors.js";
 export { jcsCanonical, jcsCanonicalBytes, jcsCanonicalHex } from "./core/jcs.js";
 export { signPayload, verifyPayloadSignature } from "./core/signing.js";
 export { generateChallenge } from "./core/challenge.js";
-export type { PreconditionConfig, ChallengeOptions } from "./core/challenge.js";
+export type {
+  PreconditionConfig,
+  TosPreconditionConfig,
+  AgePreconditionConfig,
+  IdentityPreconditionConfig,
+  ChallengeOptions,
+} from "./core/challenge.js";
 export { buildAttestation } from "./core/attestation.js";
 export { verifyAttestation } from "./core/verify.js";
 export { generateToken, validateToken, scopeMatches } from "./core/token.js";
@@ -31,6 +37,6 @@ export { InMemoryNonceStore } from "./core/nonce.js";
 
 // MCP adapter
 export { x428Guard } from "./mcp/guard.js";
-export type { X428Config } from "./mcp/guard.js";
+export type { X428Config, McpServerLike, McpToolExtra } from "./mcp/guard.js";
 export { x428Protect } from "./mcp/middleware.js";
 export { buildElicitation } from "./mcp/elicitation.js";
