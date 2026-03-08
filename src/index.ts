@@ -36,7 +36,10 @@ export type { NonceStore } from "./core/nonce.js";
 export { InMemoryNonceStore } from "./core/nonce.js";
 
 // MCP adapter
-export { x428Guard } from "./mcp/guard.js";
-export type { X428Config, McpServerLike, McpToolExtra } from "./mcp/guard.js";
+export { x428Guard, x428GuardElicitation } from "./mcp/guard.js";
+export type { X428Config, McpServerLike, McpToolExtra, McpServerWithInit } from "./mcp/guard.js";
 export { x428Protect } from "./mcp/middleware.js";
-export { buildElicitation } from "./mcp/elicitation.js";
+export { buildElicitation, buildCombinedElicitation } from "./mcp/elicitation.js";
+export { buildAppHtml } from "./mcp/app-ui.js";
+export { createEphemeralDid } from "./mcp/ephemeral-did.js";
+export type { EphemeralDid } from "./mcp/ephemeral-did.js";
