@@ -28,3 +28,8 @@ export { DidKeyResolver, StaticDidResolver } from "./core/did.js";
 // Nonce store
 export type { NonceStore } from "./core/nonce.js";
 export { InMemoryNonceStore } from "./core/nonce.js";
+
+// MCP adapter
+export { x428Guard } from "./mcp/guard.js";
+export type { X428Config } from "./mcp/guard.js";
+export { buildElicitation } from "./mcp/elicitation.js";
