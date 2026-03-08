@@ -2,8 +2,9 @@
 /**
  * x428 Demo MCP Server
  *
- * A minimal MCP server demonstrating x428 precondition guards
- * with different precondition requirements per tool.
+ * Demonstrates x428 precondition guards with per-tool preconditions.
+ * Auto-detects MCP Apps support for rich inline UI, falls back to
+ * elicitation dialogs when not available.
  *
  * Usage:
  *   npx tsx examples/demo-server.ts
@@ -32,98 +33,98 @@ const server = new McpServer({
 });
 
 // Search: requires TOS acceptance only
-server.tool(
+x428Guard(
+  server,
+  {
+    preconditions: [
+      {
+        type: "tos",
+        documentUrl: "https://x428.org/demo-tos",
+        tosVersion: "1.0",
+        documentHash: "sha256-deadbeef",
+      },
+    ],
+    resourceUri: "x428://mcp/tool/search",
+  },
   "search",
-  "Search for information (requires TOS acceptance)",
-  { query: z.string().describe("Search query") },
-  x428Guard(
-    {
-      server: server.server,
-      preconditions: [
+  {
+    description: "Search for information (requires TOS acceptance)",
+    inputSchema: { query: z.string().describe("Search query") },
+  },
+  async ({ query }: { query: string }) => {
+    return {
+      content: [
         {
-          type: "tos",
-          documentUrl: "https://x428.org/demo-tos",
-          tosVersion: "1.0",
-          documentHash: "sha256-deadbeef",
+          type: "text",
+          text: `Search results for "${query}":\n\n1. Example result about ${query}\n2. Another result about ${query}\n3. More information on ${query}`,
         },
       ],
-      resourceUri: "x428://mcp/tool/search",
-    },
-    async ({ query }: { query: string }) => {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Search results for "${query}":\n\n1. Example result about ${query}\n2. Another result about ${query}\n3. More information on ${query}`,
-          },
-        ],
-      };
-    },
-  ),
+    };
+  },
 );
 
 // Lookup: requires age verification only
-server.tool(
+x428Guard(
+  server,
+  {
+    preconditions: [
+      {
+        type: "age",
+        minimumAge: 18,
+      },
+    ],
+    resourceUri: "x428://mcp/tool/lookup",
+  },
   "lookup",
-  "Look up a record by ID (requires age verification)",
-  { id: z.string().describe("Record ID to look up") },
-  x428Guard(
-    {
-      server: server.server,
-      preconditions: [
+  {
+    description: "Look up a record by ID (requires age verification)",
+    inputSchema: { id: z.string().describe("Record ID to look up") },
+  },
+  async ({ id }: { id: string }) => {
+    return {
+      content: [
         {
-          type: "age",
-          minimumAge: 18,
+          type: "text",
+          text: `Record ${id}:\n  Name: Example Record\n  Status: Active\n  Created: 2026-01-15`,
         },
       ],
-      resourceUri: "x428://mcp/tool/lookup",
-    },
-    async ({ id }: { id: string }) => {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Record ${id}:\n  Name: Example Record\n  Status: Active\n  Created: 2026-01-15`,
-          },
-        ],
-      };
-    },
-  ),
+    };
+  },
 );
 
 // Info: requires both TOS + age
-server.tool(
+x428Guard(
+  server,
+  {
+    preconditions: [
+      {
+        type: "tos",
+        documentUrl: "https://x428.org/demo-tos",
+        tosVersion: "1.0",
+        documentHash: "sha256-deadbeef",
+      },
+      {
+        type: "age",
+        minimumAge: 18,
+      },
+    ],
+    resourceUri: "x428://mcp/tool/info",
+  },
   "info",
-  "Get detailed info (requires TOS acceptance and age verification)",
-  { topic: z.string().describe("Topic to get info about") },
-  x428Guard(
-    {
-      server: server.server,
-      preconditions: [
+  {
+    description: "Get detailed info (requires TOS acceptance and age verification)",
+    inputSchema: { topic: z.string().describe("Topic to get info about") },
+  },
+  async ({ topic }: { topic: string }) => {
+    return {
+      content: [
         {
-          type: "tos",
-          documentUrl: "https://x428.org/demo-tos",
-          tosVersion: "1.0",
-          documentHash: "sha256-deadbeef",
-        },
-        {
-          type: "age",
-          minimumAge: 18,
+          type: "text",
+          text: `Detailed info about "${topic}":\n\nThis is comprehensive information requiring both TOS acceptance and age verification.`,
         },
       ],
-      resourceUri: "x428://mcp/tool/info",
-    },
-    async ({ topic }: { topic: string }) => {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Detailed info about "${topic}":\n\nThis is comprehensive information requiring both TOS acceptance and age verification.`,
-          },
-        ],
-      };
-    },
-  ),
+    };
+  },
 );
 
 // Connect via stdio
