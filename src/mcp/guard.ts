@@ -295,13 +295,12 @@ function ensureAttestToolRegistered(
 /**
  * Register a single MCP tool with x428 precondition enforcement via MCP Apps.
  *
- * Tools are registered with `_meta.ui.resourceUri` so MCP Apps-capable hosts
- * (Inspector, Claude Desktop) render an inline acceptance UI. The tool returns
- * `structuredContent` with precondition data for the App, plus text `content`
- * as fallback for the model context.
+ * Returns `structuredContent` with precondition data and `_meta.ui.resourceUri`.
+ * Apps-capable hosts (Claude Desktop, Inspector Apps tab) render an inline
+ * iframe for acceptance; the App calls `x428-attest` then re-calls the tool.
  *
- * The host decides whether to render the App UI — no runtime capability
- * detection is needed.
+ * For clients that support elicitation but not Apps (e.g. Inspector Tools tab),
+ * use `x428GuardElicitation` instead.
  */
 export function x428Guard(
   mcpServer: McpServerWithInit,
