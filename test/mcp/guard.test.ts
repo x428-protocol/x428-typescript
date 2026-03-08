@@ -330,3 +330,68 @@ describe("x428Guard — MCP Apps mode", () => {
     expect(result.content[0].text).toContain("declined");
   });
 });
+
+// ---------------------------------------------------------------------------
+// x428Guard — elicitation fallback (when client advertises elicitation capability)
+// ---------------------------------------------------------------------------
+
+describe("x428Guard — elicitation fallback", () => {
+  /** Mock server that advertises elicitation capability. */
+  function createElicitationMcpServer() {
+    const base = createMockMcpServer();
+    // Override to advertise elicitation capability
+    base.server.getClientCapabilities = vi.fn().mockReturnValue({ elicitation: {} });
+    return base;
+  }
+
+  it("uses elicitation when client has elicitation capability", async () => {
+    const mcpServer = createElicitationMcpServer();
+    const handler = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "result" }] });
+
+    x428Guard(mcpServer, {
+      preconditions: [
+        { type: "tos", tosVersion: "1.0", documentUrl: "https://example.com/tos", documentHash: "sha256-abc" },
+      ],
+    }, "search", {}, handler);
+
+    const result = await mcpServer.callTool("search", { q: "test" }, mockExtra("e1"));
+    // Elicitation path calls handler directly (no structuredContent)
+    expect(handler).toHaveBeenCalledOnce();
+    expect(result.content[0].text).toBe("result");
+    expect(mcpServer.server.elicitInput).toHaveBeenCalledOnce();
+  });
+
+  it("returns error when user declines elicitation", async () => {
+    const mcpServer = createElicitationMcpServer();
+    mcpServer.server.elicitInput = vi.fn().mockResolvedValue({ action: "decline" });
+    const handler = vi.fn();
+
+    x428Guard(mcpServer, {
+      preconditions: [
+        { type: "tos", tosVersion: "1.0", documentUrl: "https://example.com/tos", documentHash: "sha256-abc" },
+      ],
+    }, "search", {}, handler);
+
+    const result = await mcpServer.callTool("search", {}, mockExtra("e2"));
+    expect(handler).not.toHaveBeenCalled();
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("declined");
+  });
+
+  it("uses Apps path when client has no elicitation capability", async () => {
+    const mcpServer = createMockMcpServer(); // no elicitation in capabilities
+    const handler = vi.fn();
+
+    x428Guard(mcpServer, {
+      preconditions: [
+        { type: "tos", tosVersion: "1.0", documentUrl: "https://example.com/tos", documentHash: "sha256-abc" },
+      ],
+    }, "search", {}, handler);
+
+    const result = await mcpServer.callTool("search", {}, mockExtra("e3"));
+    // Apps path returns structuredContent
+    expect(result.structuredContent.x428Status).toBe("pending");
+    expect(handler).not.toHaveBeenCalled();
+    expect(mcpServer.server.elicitInput).not.toHaveBeenCalled();
+  });
+});

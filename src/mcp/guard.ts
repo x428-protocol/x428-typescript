@@ -296,9 +296,53 @@ export function x428Guard(
     const cached = getCachedToken(sessionId);
     if (cached) return handler(args, extra);
 
-    // Generate challenge and return structuredContent for the App UI.
-    // The host renders the App iframe; the App calls x428/attest on acceptance.
     const challenge = generateChallenge(config.preconditions, resourceUri, { ttlSeconds: 300 });
+    const preconditions = challenge.preconditions as PreconditionObject[];
+
+    // Check if client supports elicitation — use it as fallback for non-Apps clients.
+    // Clients like Inspector advertise elicitation; Claude Desktop does not (it uses Apps).
+    const clientCaps = mcpServer.server.getClientCapabilities?.() as Record<string, unknown> | null | undefined;
+    const hasElicitation = !!(clientCaps && "elicitation" in clientCaps);
+    const elicitFn = mcpServer.server.elicitInput;
+
+    if (hasElicitation && elicitFn) {
+      // Elicitation path: prompt user with checkboxes
+      const elicitReq = buildCombinedElicitation(preconditions);
+      let elicitResult: { action: string; content?: Record<string, unknown> };
+      try {
+        elicitResult = await elicitFn.call(mcpServer.server, elicitReq, { requestId: extra.requestId });
+      } catch (err) {
+        return { content: [{ type: "text", text: `x428: Elicitation failed: ${err}` }], isError: true };
+      }
+
+      if (elicitResult.action !== "accept") {
+        return { content: [{ type: "text", text: "x428: User declined precondition(s)." }], isError: true };
+      }
+
+      for (const precondition of preconditions) {
+        const fieldKey = `confirm_${precondition.id}`;
+        const confirmed = elicitResult.content?.[fieldKey]
+          ?? (preconditions.length === 1 && (elicitResult.content?.accept ?? elicitResult.content?.confirm));
+        if (!confirmed) {
+          return { content: [{ type: "text", text: `x428: User did not confirm ${precondition.type} precondition.` }], isError: true };
+        }
+      }
+
+      try {
+        const result = await processAttestation(challenge, operatorDid, privateKey, resolver, nonceStore, tokenTtl);
+        if (result instanceof X428Error) {
+          return { content: [{ type: "text", text: `x428: Attestation failed: ${result.detail}` }], isError: true };
+        }
+        const cacheKey = `${sessionId}:${resourceUri}`;
+        tokenCache.set(cacheKey, result);
+        return handler(args, extra);
+      } catch (err) {
+        return { content: [{ type: "text", text: `x428: Attestation error: ${err}` }], isError: true };
+      }
+    }
+
+    // Apps path: return structuredContent for the App iframe.
+    // The host renders the iframe; the App calls x428/attest on acceptance.
     state.pendingChallenges.set(sessionId, challenge);
 
     return {
@@ -308,7 +352,7 @@ export function x428Guard(
         toolName,
         toolArgs: args,
         challengeId: sessionId,
-        preconditions: (challenge.preconditions as PreconditionObject[]).map((p) => ({
+        preconditions: preconditions.map((p) => ({
           type: p.type,
           ...(p.type === "tos" ? { documentUrl: p.documentUrl, tosVersion: p.tosVersion } : {}),
           ...(p.type === "age" ? { minimumAge: p.minimumAge } : {}),
