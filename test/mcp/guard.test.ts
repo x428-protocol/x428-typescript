@@ -308,7 +308,7 @@ describe("x428Guard — MCP Apps mode", () => {
     expect(handler).not.toHaveBeenCalled();
   });
 
-  it("x428-attest calls handler directly and returns tool result", async () => {
+  it("x428-attest caches token, re-call on same session executes handler", async () => {
     const mcpServer = createMockMcpServer();
     const handler = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "result" }] });
 
@@ -320,14 +320,17 @@ describe("x428Guard — MCP Apps mode", () => {
 
     await mcpServer.simulateInitialize();
     const extra = mockExtra("s1");
-    // First call → pending, get challengeId from structuredContent
+    // First call → pending
     const pending = await mcpServer.callTool("search", { q: "hi" }, extra);
     const challengeId = pending.structuredContent.challengeId;
     expect(challengeId).toBeDefined();
-    // Accept attestation — x428-attest calls handler directly
-    const result = await mcpServer.callTool("x428-attest", { challengeId, accepted: true }, extra);
+    // Accept attestation → caches token by sessionId
+    const attestResult = await mcpServer.callTool("x428-attest", { challengeId, accepted: true }, extra);
+    expect(attestResult.content[0].text).toContain("accepted");
+    expect(handler).not.toHaveBeenCalled();
+    // Re-call on same session → token found, handler executes
+    const result = await mcpServer.callTool("search", { q: "hi" }, extra);
     expect(handler).toHaveBeenCalledOnce();
-    expect(handler).toHaveBeenCalledWith({ q: "hi" }, extra);
     expect(result.content[0].text).toBe("result");
   });
 
@@ -391,7 +394,7 @@ describe("x428Guard — capability-independent behavior", () => {
     expect(handler).not.toHaveBeenCalled();
   });
 
-  it("cross-session: attest on different session calls handler directly", async () => {
+  it("cross-session: attest on AppBridge, re-call on same AppBridge session", async () => {
     const mcpServer = createMockMcpServer();
     const handler = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "result" }] });
 
@@ -405,11 +408,14 @@ describe("x428Guard — capability-independent behavior", () => {
     const pending = await mcpServer.callTool("search", { q: "hi" }, mockExtra("model-session"));
     const challengeId = pending.structuredContent.challengeId;
 
-    // AppBridge session attests (different sessionId, same challengeId)
-    // x428-attest calls handler directly with stored args
-    const result = await mcpServer.callTool("x428-attest", { challengeId, accepted: true }, mockExtra("appbridge-session"));
+    // AppBridge session attests (different sessionId, finds challenge by UUID)
+    const appExtra = mockExtra("appbridge-session");
+    const attestResult = await mcpServer.callTool("x428-attest", { challengeId, accepted: true }, appExtra);
+    expect(attestResult.content[0].text).toContain("accepted");
+
+    // AppBridge re-calls tool (same session as attest) → token found
+    const result = await mcpServer.callTool("search", { q: "hi" }, appExtra);
     expect(handler).toHaveBeenCalledOnce();
-    expect(handler).toHaveBeenCalledWith({ q: "hi" }, expect.anything());
     expect(result.content[0].text).toBe("result");
   });
 });

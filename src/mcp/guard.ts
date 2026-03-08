@@ -119,17 +119,11 @@ async function processAttestation(
 // x428-attest call find the context regardless of which session it arrives on.
 // ---------------------------------------------------------------------------
 
-/** Pending challenge context, stored when a guarded tool is first called. */
-interface PendingContext {
-  challenge: PreconditionChallenge;
-  toolName: string;
-  toolArgs: any;
-  handler: (args: any, extra: McpToolExtra) => Promise<any>;
-  /** Whether the originating session advertised MCP Apps extensions. */
-  hasAppsCapability: boolean;
-}
+/** Pending challenges, keyed by challengeId (UUID) for cross-session lookup. */
+const sharedChallenges = new Map<string, PreconditionChallenge>();
 
-const sharedPending = new Map<string, PendingContext>();
+/** Attestation tokens, keyed by "sessionId:resourceUri" for standard lookup. */
+const sharedTokens = new Map<string, AttestationToken>();
 
 // Per-server state (registration flags + capability detection)
 interface ServerState {
@@ -220,6 +214,7 @@ function ensureAttestToolRegistered(
   resolver: DidResolver,
   nonceStore: NonceStore,
   tokenTtl: number,
+  resourceUri: string,
 ): void {
   const state = getServerState(server);
   if (state.attestToolRegistered) return;
@@ -233,8 +228,8 @@ function ensureAttestToolRegistered(
       };
     }
 
-    const pending = sharedPending.get(args.challengeId);
-    if (!pending) {
+    const challenge = sharedChallenges.get(args.challengeId);
+    if (!challenge) {
       return {
         content: [{ type: "text", text: "x428: No pending challenge found." }],
         isError: true,
@@ -243,7 +238,7 @@ function ensureAttestToolRegistered(
 
     try {
       const result = await processAttestation(
-        pending.challenge, operatorDid, privateKey, resolver, nonceStore, tokenTtl,
+        challenge, operatorDid, privateKey, resolver, nonceStore, tokenTtl,
       );
 
       if (result instanceof X428Error) {
@@ -253,12 +248,17 @@ function ensureAttestToolRegistered(
         };
       }
 
-      sharedPending.delete(args.challengeId);
+      // Cache token by the calling session's ID. The App iframe's
+      // re-call of the original tool uses the same session (AppBridge),
+      // so the token will be found by sessionId on the next call.
+      const sessionId = extra.sessionId ?? "_default";
+      const cacheKey = `${sessionId}:${resourceUri}`;
+      sharedTokens.set(cacheKey, result);
+      sharedChallenges.delete(args.challengeId);
 
-      // Call the original tool handler directly and return its result.
-      // This avoids a re-call from the App (which would fail because
-      // Zod strips unknown fields from tool arguments).
-      return pending.handler(pending.toolArgs, extra);
+      return {
+        content: [{ type: "text", text: "x428: Attestation accepted. You may now use the tool." }],
+      };
     } catch (err) {
       return {
         content: [{ type: "text", text: `x428: Attestation error: ${err}` }],
@@ -323,31 +323,27 @@ export function x428Guard(
   // Eagerly register shared infrastructure
   ensureResourceRegistered(mcpServer);
   ensureAttestToolRegistered(
-    mcpServer, operatorDid, privateKey, resolver, nonceStore, tokenTtl,
+    mcpServer, operatorDid, privateKey, resolver, nonceStore, tokenTtl, resourceUri,
   );
 
   const toolCallback = async (args: any, extra: McpToolExtra) => {
+    // Check token cache by sessionId — works for re-calls from the App
+    // iframe since x428-attest and the re-call use the same session.
+    const sessionId = extra.sessionId ?? "_default";
+    const cacheKey = `${sessionId}:${resourceUri}`;
+    const cached = sharedTokens.get(cacheKey);
+    if (cached && new Date(cached.expiresAt) > new Date()) {
+      return handler(args, extra);
+    }
+
     const challengeId = crypto.randomUUID();
     const challenge = generateChallenge(config.preconditions, resourceUri, { ttlSeconds: 300 });
     const preconditions = challenge.preconditions as PreconditionObject[];
 
-    // Detect whether this session has Apps capability (for tracking)
-    const hasAppsCapability = !!(state.rawExtensions?.["io.modelcontextprotocol/ui"]);
+    // Store challenge in shared map keyed by challengeId (UUID).
+    // x428-attest finds it by challengeId regardless of session.
+    sharedChallenges.set(challengeId, challenge);
 
-    // Store pending context in shared (module-level) map keyed by challengeId.
-    // Includes handler + args so x428-attest can call the handler directly
-    // (avoids re-call, which fails because Zod strips unknown fields).
-    sharedPending.set(challengeId, {
-      challenge,
-      toolName,
-      toolArgs: args,
-      handler,
-      hasAppsCapability,
-    });
-
-    // Always return structuredContent for MCP Apps. The tool is registered
-    // with _meta.ui.resourceUri so Apps-capable hosts render the iframe.
-    // The text content serves as fallback for the model context.
     return {
       content: [{ type: "text", text: `x428: Precondition acceptance required for ${toolName}.` }],
       structuredContent: {

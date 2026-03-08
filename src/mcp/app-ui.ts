@@ -9,8 +9,9 @@
  * 2. App sends ui/notifications/initialized to signal readiness
  * 3. Host sends ui/notifications/tool-result with structuredContent
  * 4. If structuredContent.x428Status === "pending", renders precondition cards
- * 5. User clicks Accept → app calls x428-attest server tool
- * 6. x428-attest verifies attestation, calls original handler, returns result
+ * 5. User clicks Accept → app calls x428-attest tool
+ * 6. x428-attest verifies attestation, caches token by sessionId
+ * 7. App re-calls original tool — same session, token found, handler runs
  */
 export function buildAppHtml(): string {
   return `<!DOCTYPE html>
@@ -262,8 +263,15 @@ export function buildAppHtml(): string {
         return;
       }
 
-      // x428-attest calls the original handler directly and returns its result
-      const text = attestResult.content?.find(c => c.type === "text")?.text || "Accepted.";
+      // Re-call the original tool — token is cached by sessionId,
+      // and this re-call uses the same session as x428-attest.
+      const toolResult = await sendRpc("tools/call", {
+        name: sc.toolName,
+        arguments: sc.toolArgs || {}
+      });
+
+      // Show the tool result
+      const text = toolResult.content?.find(c => c.type === "text")?.text || "Accepted.";
       showStatus(text, "accepted");
     } catch (e) {
       showStatus("Error: " + e.message, "error");
