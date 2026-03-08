@@ -1,0 +1,146 @@
+[
+  {
+    "description": "Nonce replay — second use of same nonce rejected",
+    "category": "verify-sequence",
+    "steps": [
+      {
+        "input": {
+          "challenge": {
+            "x428Version": 1,
+            "preconditions": [
+              {
+                "id": "tos-v2-main",
+                "type": "tos",
+                "tosVersion": "2.1",
+                "documentUrl": "https://example.com/tos/v2.1",
+                "documentHash": "sha256-e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "allowedAttestationMethods": [
+                  "self",
+                  "vc"
+                ]
+              }
+            ],
+            "resource": "https://example.com/api/data",
+            "challenge": "a3f8b2c9d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1",
+            "expiresAt": "2025-03-06T12:05:00Z",
+            "attestationEndpoint": "https://example.com/.well-known/x428-attest"
+          },
+          "attestationPayload": {
+            "x428Version": 1,
+            "challenge": "a3f8b2c9d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1",
+            "resource": "https://example.com/api/data",
+            "operatorId": "did:key:z6MkneMkZqwqRiU5mJzSG3kDwzt9P8C59N4NGTfBLfSGE7c7",
+            "attestations": [
+              {
+                "preconditionId": "tos-v2-main",
+                "type": "tos",
+                "method": "self",
+                "documentHash": "sha256-e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "confirmedAt": "2025-03-06T11:55:00Z"
+              }
+            ],
+            "signature": "JKNiWkFmxrRfBOHFrSKjN2x7YUvtDikPsX_5VnM1IRsCZoBCJwMMbljq7DOYFLgJrjMc04VjhnnfqBR7jLUNBQ"
+          },
+          "didDocument": {
+            "@context": [
+              "https://www.w3.org/ns/did/v1",
+              "https://w3id.org/security/jwk/v1"
+            ],
+            "id": "did:key:z6MkneMkZqwqRiU5mJzSG3kDwzt9P8C59N4NGTfBLfSGE7c7",
+            "verificationMethod": [
+              {
+                "id": "did:key:z6MkneMkZqwqRiU5mJzSG3kDwzt9P8C59N4NGTfBLfSGE7c7#key-1",
+                "type": "JsonWebKey",
+                "controller": "did:key:z6MkneMkZqwqRiU5mJzSG3kDwzt9P8C59N4NGTfBLfSGE7c7",
+                "publicKeyJwk": {
+                  "kty": "OKP",
+                  "crv": "Ed25519",
+                  "x": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ"
+                }
+              }
+            ],
+            "assertionMethod": [
+              "did:key:z6MkneMkZqwqRiU5mJzSG3kDwzt9P8C59N4NGTfBLfSGE7c7#key-1"
+            ]
+          },
+          "nonceStore": [],
+          "currentTime": "2025-03-06T11:56:00Z"
+        },
+        "expected": {
+          "accept": true,
+          "tokenScope": "https://example.com/api/data"
+        }
+      },
+      {
+        "input": {
+          "challenge": {
+            "x428Version": 1,
+            "preconditions": [
+              {
+                "id": "tos-v2-main",
+                "type": "tos",
+                "tosVersion": "2.1",
+                "documentUrl": "https://example.com/tos/v2.1",
+                "documentHash": "sha256-e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "allowedAttestationMethods": [
+                  "self",
+                  "vc"
+                ]
+              }
+            ],
+            "resource": "https://example.com/api/data",
+            "challenge": "a3f8b2c9d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1",
+            "expiresAt": "2025-03-06T12:05:00Z",
+            "attestationEndpoint": "https://example.com/.well-known/x428-attest"
+          },
+          "attestationPayload": {
+            "x428Version": 1,
+            "challenge": "a3f8b2c9d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1",
+            "resource": "https://example.com/api/data",
+            "operatorId": "did:key:z6MkneMkZqwqRiU5mJzSG3kDwzt9P8C59N4NGTfBLfSGE7c7",
+            "attestations": [
+              {
+                "preconditionId": "tos-v2-main",
+                "type": "tos",
+                "method": "self",
+                "documentHash": "sha256-e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "confirmedAt": "2025-03-06T11:55:00Z"
+              }
+            ],
+            "signature": "JKNiWkFmxrRfBOHFrSKjN2x7YUvtDikPsX_5VnM1IRsCZoBCJwMMbljq7DOYFLgJrjMc04VjhnnfqBR7jLUNBQ"
+          },
+          "didDocument": {
+            "@context": [
+              "https://www.w3.org/ns/did/v1",
+              "https://w3id.org/security/jwk/v1"
+            ],
+            "id": "did:key:z6MkneMkZqwqRiU5mJzSG3kDwzt9P8C59N4NGTfBLfSGE7c7",
+            "verificationMethod": [
+              {
+                "id": "did:key:z6MkneMkZqwqRiU5mJzSG3kDwzt9P8C59N4NGTfBLfSGE7c7#key-1",
+                "type": "JsonWebKey",
+                "controller": "did:key:z6MkneMkZqwqRiU5mJzSG3kDwzt9P8C59N4NGTfBLfSGE7c7",
+                "publicKeyJwk": {
+                  "kty": "OKP",
+                  "crv": "Ed25519",
+                  "x": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ"
+                }
+              }
+            ],
+            "assertionMethod": [
+              "did:key:z6MkneMkZqwqRiU5mJzSG3kDwzt9P8C59N4NGTfBLfSGE7c7#key-1"
+            ]
+          },
+          "nonceStore": [
+            "a3f8b2c9d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1"
+          ],
+          "currentTime": "2025-03-06T11:56:00Z"
+        },
+        "expected": {
+          "accept": false,
+          "errorCode": "nonce_replayed"
+        }
+      }
+    ]
+  }
+]
