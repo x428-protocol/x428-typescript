@@ -65,11 +65,59 @@ mcpServer.tool("search", { query: { type: "string" } }, async (args, extra) => {
 });
 ```
 
-### Automatic MCP Apps support
+### Two guard modes
 
-When the MCP client supports [MCP Apps](https://modelcontextprotocol.io/docs/extensions/apps) (Claude Desktop, VS Code Copilot, etc.), the guard automatically renders a rich inline acceptance UI directly in the conversation — showing TOS documents, age requirements, and identity prompts with styled Accept/Decline buttons.
+**`x428Guard`** — MCP Apps mode. Registers tools with `_meta.ui.resourceUri` pointing to a rich inline HTML acceptance UI. For clients that support [MCP Apps](https://modelcontextprotocol.io/docs/extensions/apps) (Claude Desktop, VS Code Copilot, MCP Inspector Apps tab).
 
-For clients without MCP Apps support, the guard falls back to standard MCP elicitation dialogs. No code changes needed — detection is automatic via capability negotiation at connection time.
+**`x428GuardElicitation`** — Elicitation mode. Wraps tool handlers with `elicitInput()` confirmation dialogs. For clients that support MCP elicitation but not Apps (MCP Inspector Tools tab).
+
+```typescript
+import { x428Guard, x428GuardElicitation } from "x428";
+
+// Apps mode — registers tool with inline UI
+x428Guard(mcpServer, { preconditions: [...] }, "search", { ... }, handler);
+
+// Elicitation mode — wraps handler with confirmation dialog
+server.tool("search", { ... },
+  x428GuardElicitation({ server: server.server, preconditions: [...] }, handler),
+);
+```
+
+Choose based on your target client. See the demo servers for complete examples.
+
+## Demo Servers
+
+Two demo servers are provided, sharing the same tool definitions (`examples/demo-tools.ts`):
+
+### Elicitation mode (stdio)
+
+Uses `x428GuardElicitation` with checkbox dialogs. Best for MCP Inspector's Tools tab.
+
+```bash
+# Run with MCP Inspector
+npx @modelcontextprotocol/inspector npx tsx examples/demo-server.ts
+```
+
+### MCP Apps mode (HTTP)
+
+Uses `x428Guard` with a rich inline HTML acceptance UI. Best for Claude Desktop and MCP Inspector's Apps tab.
+
+```bash
+# Start the server
+npx tsx examples/demo-server-apps.ts
+
+# Open MCP Inspector (in another terminal)
+npx @modelcontextprotocol/inspector --transport http --server-url http://localhost:3428/mcp
+```
+
+For Claude Desktop, tunnel the HTTP server:
+
+```bash
+cloudflared tunnel --url http://localhost:3428
+# Add https://<tunnel-url>/mcp as a Streamable HTTP server in Claude Desktop
+```
+
+Both demos include three tools: `search` (TOS), `lookup` (age verification), `info` (TOS + age).
 
 ## Core Protocol API
 

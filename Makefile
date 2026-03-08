@@ -1,4 +1,4 @@
-.PHONY: setup test build typecheck update-vectors check-vectors clean
+.PHONY: setup test build typecheck update-vectors check-vectors clean demo demo-apps
 
 ## First-time setup: install deps and init submodule
 setup:
@@ -38,6 +38,14 @@ update-vectors:
 	@echo ""
 	@echo "Submodule updated. Run 'make test' to verify, then:"
 	@echo "  git add vendor/spec && git commit -m 'update spec vectors'"
+
+## Run elicitation demo (stdio, use with MCP Inspector)
+demo:
+	npx tsx examples/demo-server.ts
+
+## Run MCP Apps demo (HTTP on :3428, use with Inspector or Claude Desktop)
+demo-apps:
+	npx tsx examples/demo-server-apps.ts
 
 ## Clean build artifacts
 clean:
