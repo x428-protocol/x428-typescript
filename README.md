@@ -6,19 +6,22 @@ x428 extends HTTP 428 ("Precondition Required") into a challenge-response handsh
 
 ## Development
 
+Conformance test vectors are pulled from the [spec repo](https://github.com/x428-protocol/spec) via a git submodule (pinned to a spec release tag). `make test` will warn if the vectors are behind `origin/main`.
+
 ```bash
 git clone --recurse-submodules https://github.com/x428-protocol/x428-typescript.git
 cd x428-typescript
 make setup    # install deps + init submodule
-make test     # run 79 conformance + unit tests
+make test     # run conformance + unit tests (warns if vectors are stale)
 make typecheck
+make build
 ```
 
 To pull updated conformance vectors from the spec:
 
 ```bash
-make update-vectors
-make test
+make update-vectors   # fetches latest from spec repo
+make test             # verify everything still passes
 git add vendor/spec && git commit -m "update spec vectors"
 ```
 
