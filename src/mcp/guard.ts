@@ -111,15 +111,25 @@ async function processAttestation(
 }
 
 // ---------------------------------------------------------------------------
-// Shared challenge store — module-level so it works across MCP sessions.
+// Shared pending context — module-level so it works across MCP sessions.
 // Claude Desktop creates separate AppBridge and Model sessions with different
 // Mcp-Session-Id values (ext-apps#481). The App iframe's tools/call goes
 // through the AppBridge session, not the Model session that originally called
 // the tool. Keying by challengeId (UUID) instead of sessionId lets the
-// x428-attest call find the challenge regardless of which session it arrives on.
+// x428-attest call find the context regardless of which session it arrives on.
 // ---------------------------------------------------------------------------
-const sharedChallenges = new Map<string, PreconditionChallenge>();
-const sharedTokens = new Map<string, AttestationToken>();
+
+/** Pending challenge context, stored when a guarded tool is first called. */
+interface PendingContext {
+  challenge: PreconditionChallenge;
+  toolName: string;
+  toolArgs: any;
+  handler: (args: any, extra: McpToolExtra) => Promise<any>;
+  /** Whether the originating session advertised MCP Apps extensions. */
+  hasAppsCapability: boolean;
+}
+
+const sharedPending = new Map<string, PendingContext>();
 
 // Per-server state (registration flags + capability detection)
 interface ServerState {
@@ -215,7 +225,7 @@ function ensureAttestToolRegistered(
   if (state.attestToolRegistered) return;
   state.attestToolRegistered = true;
 
-  const attestHandler = async (args: { challengeId: string; accepted: boolean }, _extra: McpToolExtra) => {
+  const attestHandler = async (args: { challengeId: string; accepted: boolean }, extra: McpToolExtra) => {
     if (!args.accepted) {
       return {
         content: [{ type: "text", text: "x428: User declined preconditions." }],
@@ -223,8 +233,8 @@ function ensureAttestToolRegistered(
       };
     }
 
-    const challenge = sharedChallenges.get(args.challengeId);
-    if (!challenge) {
+    const pending = sharedPending.get(args.challengeId);
+    if (!pending) {
       return {
         content: [{ type: "text", text: "x428: No pending challenge found." }],
         isError: true,
@@ -233,7 +243,7 @@ function ensureAttestToolRegistered(
 
     try {
       const result = await processAttestation(
-        challenge, operatorDid, privateKey, resolver, nonceStore, tokenTtl,
+        pending.challenge, operatorDid, privateKey, resolver, nonceStore, tokenTtl,
       );
 
       if (result instanceof X428Error) {
@@ -243,13 +253,12 @@ function ensureAttestToolRegistered(
         };
       }
 
-      // Cache token by challengeId so the re-call from the App can find it
-      sharedTokens.set(args.challengeId, result);
-      sharedChallenges.delete(args.challengeId);
+      sharedPending.delete(args.challengeId);
 
-      return {
-        content: [{ type: "text", text: "x428: Attestation accepted. You may now use the tool." }],
-      };
+      // Call the original tool handler directly and return its result.
+      // This avoids a re-call from the App (which would fail because
+      // Zod strips unknown fields from tool arguments).
+      return pending.handler(pending.toolArgs, extra);
     } catch (err) {
       return {
         content: [{ type: "text", text: `x428: Attestation error: ${err}` }],
@@ -318,39 +327,27 @@ export function x428Guard(
   );
 
   const toolCallback = async (args: any, extra: McpToolExtra) => {
-    // Check if any cached token exists for this challengeId (passed back
-    // by the App when it re-calls the tool after attestation).
-    // On the re-call, the App sends the original args which may include
-    // a _x428ChallengeId from the first call's structuredContent.
-    const recallChallengeId = args?._x428ChallengeId as string | undefined;
-    if (recallChallengeId) {
-      const cached = sharedTokens.get(recallChallengeId);
-      if (cached && new Date(cached.expiresAt) > new Date()) {
-        // Strip internal field before passing to handler
-        const { _x428ChallengeId: _, ...cleanArgs } = args;
-        return handler(cleanArgs, extra);
-      }
-    }
-
-    // Generate a UUID challengeId for cross-session correlation
     const challengeId = crypto.randomUUID();
     const challenge = generateChallenge(config.preconditions, resourceUri, { ttlSeconds: 300 });
     const preconditions = challenge.preconditions as PreconditionObject[];
 
-    // Store challenge in shared (module-level) map keyed by challengeId.
-    // This works across Claude Desktop's separate AppBridge and Model
-    // sessions (ext-apps#481).
-    sharedChallenges.set(challengeId, challenge);
+    // Detect whether this session has Apps capability (for tracking)
+    const hasAppsCapability = !!(state.rawExtensions?.["io.modelcontextprotocol/ui"]);
+
+    // Store pending context in shared (module-level) map keyed by challengeId.
+    // Includes handler + args so x428-attest can call the handler directly
+    // (avoids re-call, which fails because Zod strips unknown fields).
+    sharedPending.set(challengeId, {
+      challenge,
+      toolName,
+      toolArgs: args,
+      handler,
+      hasAppsCapability,
+    });
 
     // Always return structuredContent for MCP Apps. The tool is registered
     // with _meta.ui.resourceUri so Apps-capable hosts render the iframe.
     // The text content serves as fallback for the model context.
-    //
-    // Capability detection (extensions, elicitation) is captured but not
-    // used for branching — blocked on upstream issues:
-    // - Claude Desktop lacks elicitation (claude-code#2799)
-    // - Multi-session state isolation (ext-apps#481, #458)
-    // - SDK strips extensions (typescript-sdk#1063)
     return {
       content: [{ type: "text", text: `x428: Precondition acceptance required for ${toolName}.` }],
       structuredContent: {
