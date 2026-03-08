@@ -110,6 +110,8 @@ interface AppsState {
   pendingChallenges: Map<string, PreconditionChallenge>;
   attestToolRegistered: boolean;
   resourceRegistered: boolean;
+  rawExtensions: Record<string, unknown> | null; // captured before Zod strips them
+  messageIntercepted: boolean;
 }
 
 const serverAppsState = new WeakMap<McpServerWithInit, AppsState>();
@@ -122,20 +124,52 @@ function getAppsState(server: McpServerWithInit): AppsState {
       pendingChallenges: new Map(),
       attestToolRegistered: false,
       resourceRegistered: false,
+      rawExtensions: null,
+      messageIntercepted: false,
     };
     serverAppsState.set(server, state);
   }
   return state;
 }
 
+/**
+ * Intercept the low-level server's _onmessage to capture raw `extensions`
+ * from the `initialize` request before Zod parsing strips them.
+ *
+ * The MCP SDK's ClientCapabilitiesSchema uses z.object() without .passthrough(),
+ * which strips unknown keys including `extensions` (pending SEP-1724).
+ * This workaround captures the raw extensions before they're lost.
+ */
+function installMessageInterceptor(server: McpServerWithInit): void {
+  const state = getAppsState(server);
+  if (state.messageIntercepted) return;
+  state.messageIntercepted = true;
+
+  const lowLevel = server.server as any;
+  const original = lowLevel._onmessage;
+  if (typeof original !== "function") return;
+
+  lowLevel._onmessage = function (message: any, extra: any) {
+    if (
+      message?.method === "initialize" &&
+      message?.params?.capabilities?.extensions
+    ) {
+      state.rawExtensions = message.params.capabilities.extensions;
+      console.error(`[x428] Captured raw extensions from initialize:`, JSON.stringify(state.rawExtensions));
+    }
+    return original.call(this, message, extra);
+  };
+}
+
 function detectAppsSupport(server: McpServerWithInit): boolean {
   const state = getAppsState(server);
   if (state.supportsApps !== null) return state.supportsApps;
 
-  const caps = server.server.getClientCapabilities?.() ?? {};
-  const extensions = (caps as any)?.extensions;
+  // Check raw extensions captured via message interceptor (preferred — survives Zod stripping)
+  const extensions = state.rawExtensions ?? (server.server.getClientCapabilities?.() as any)?.extensions;
   const uiCap = extensions?.[EXTENSION_ID];
   state.supportsApps = !!(uiCap?.mimeTypes?.includes(RESOURCE_MIME_TYPE));
+  console.error(`[x428] MCP Apps support detected: ${state.supportsApps}`);
   return state.supportsApps;
 }
 
@@ -246,6 +280,9 @@ export function x428Guard(
   const resourceUri = config.resourceUri ?? `x428://mcp/tool/${toolName}`;
   const { did: operatorDid, privateKey } = createEphemeralDid();
   const elicitServer = config.server ?? (mcpServer.server as unknown as McpServerLike);
+
+  // Install interceptor to capture raw extensions before Zod strips them
+  installMessageInterceptor(mcpServer);
 
   function getCachedToken(sessionId: string): AttestationToken | undefined {
     const key = `${sessionId}:${resourceUri}`;

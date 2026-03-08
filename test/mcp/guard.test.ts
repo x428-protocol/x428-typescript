@@ -32,18 +32,9 @@ function createMockMcpServer(supportsApps = false): McpServerWithInit & {
   const tools = new Map<string, { handler: Function }>();
   const resources = new Map<string, Function>();
 
-  const server = {
-    getClientCapabilities: vi.fn().mockReturnValue(
-      supportsApps
-        ? {
-            extensions: {
-              "io.modelcontextprotocol/ui": {
-                mimeTypes: ["text/html;profile=mcp-app"],
-              },
-            },
-          }
-        : {},
-    ),
+  const server: any = {
+    // After Zod parsing, extensions are stripped — so getClientCapabilities never has them
+    getClientCapabilities: vi.fn().mockReturnValue({}),
     oninitialized: null as (() => void) | null,
     elicitInput: vi.fn(async (params: any) => {
       // Auto-accept all fields
@@ -56,9 +47,11 @@ function createMockMcpServer(supportsApps = false): McpServerWithInit & {
       content.confirm = true;
       return { action: "accept", content };
     }),
+    // Provide _onmessage so the interceptor can wrap it
+    _onmessage: vi.fn(),
   };
 
-  return {
+  const mcpServer = {
     server,
     tool: vi.fn((...args: any[]) => {
       const name = args[0];
@@ -75,7 +68,33 @@ function createMockMcpServer(supportsApps = false): McpServerWithInit & {
       if (!tool) throw new Error(`Tool ${name} not registered`);
       return tool.handler(args, extra);
     },
+    /**
+     * Simulate the initialize message arriving (with raw extensions before Zod stripping).
+     * Call this after x428Guard to trigger the interceptor.
+     */
+    simulateInitialize() {
+      if (supportsApps && server._onmessage) {
+        // The interceptor wraps _onmessage; call the wrapper with a fake initialize message
+        server._onmessage({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-03-26",
+            capabilities: {
+              extensions: {
+                "io.modelcontextprotocol/ui": {
+                  mimeTypes: ["text/html;profile=mcp-app"],
+                },
+              },
+            },
+            clientInfo: { name: "test", version: "1.0" },
+          },
+        }, {});
+      }
+    },
   };
+  return mcpServer;
 }
 
 // ---------------------------------------------------------------------------
@@ -270,6 +289,9 @@ describe("x428Guard — MCP Apps mode", () => {
       ],
     }, "search", {}, handler);
 
+    // Simulate initialize message arriving (interceptor captures raw extensions)
+    mcpServer.simulateInitialize();
+
     const result = await mcpServer.callTool("search", { query: "test" }, mockExtra());
     expect(result.structuredContent.x428Status).toBe("pending");
     expect(result.structuredContent.toolName).toBe("search");
@@ -290,6 +312,9 @@ describe("x428Guard — MCP Apps mode", () => {
     // Before first call — only search registered
     expect(mcpServer._tools.has("x428/attest")).toBe(false);
 
+    // Simulate initialize message arriving
+    mcpServer.simulateInitialize();
+
     // First call triggers lazy registration
     await mcpServer.callTool("search", {}, mockExtra());
 
@@ -306,6 +331,9 @@ describe("x428Guard — MCP Apps mode", () => {
         { type: "tos", tosVersion: "1.0", documentUrl: "https://example.com/tos", documentHash: "sha256-abc" },
       ],
     }, "search", {}, handler);
+
+    // Simulate initialize message arriving
+    mcpServer.simulateInitialize();
 
     const extra = mockExtra("s1");
     // First call → pending
