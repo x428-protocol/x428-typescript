@@ -23,16 +23,14 @@ function mockExtra(sessionId: string = "session-1"): McpToolExtra {
   };
 }
 
-/** Create a mock McpServer that does NOT support MCP Apps. */
+/** Create a mock McpServer. */
 function createMockMcpServer(supportsApps = false): McpServerWithInit & {
   _tools: Map<string, { handler: Function }>;
   _resources: Map<string, Function>;
-  triggerInitialized(): void;
   callTool(name: string, args: any, extra: McpToolExtra): Promise<any>;
 } {
   const tools = new Map<string, { handler: Function }>();
   const resources = new Map<string, Function>();
-  let onInitCb: (() => void) | null = null;
 
   const server = {
     getClientCapabilities: vi.fn().mockReturnValue(
@@ -46,12 +44,7 @@ function createMockMcpServer(supportsApps = false): McpServerWithInit & {
           }
         : {},
     ),
-    set oninitialized(cb: (() => void) | null) {
-      onInitCb = cb;
-    },
-    get oninitialized() {
-      return onInitCb;
-    },
+    oninitialized: null as (() => void) | null,
     elicitInput: vi.fn(async (params: any) => {
       // Auto-accept all fields
       const schema = params.requestedSchema as { required?: string[] };
@@ -59,7 +52,6 @@ function createMockMcpServer(supportsApps = false): McpServerWithInit & {
       for (const key of schema.required ?? []) {
         content[key] = true;
       }
-      // Also set legacy keys for single-precondition compat
       content.accept = true;
       content.confirm = true;
       return { action: "accept", content };
@@ -69,7 +61,6 @@ function createMockMcpServer(supportsApps = false): McpServerWithInit & {
   return {
     server,
     tool: vi.fn((...args: any[]) => {
-      // Extract name and handler from tool() args
       const name = args[0];
       const handler = args[args.length - 1];
       tools.set(name, { handler });
@@ -79,9 +70,6 @@ function createMockMcpServer(supportsApps = false): McpServerWithInit & {
     }),
     _tools: tools,
     _resources: resources,
-    triggerInitialized() {
-      if (onInitCb) onInitCb();
-    },
     async callTool(name: string, args: any, extra: McpToolExtra) {
       const tool = tools.get(name);
       if (!tool) throw new Error(`Tool ${name} not registered`);
@@ -258,7 +246,7 @@ describe("x428GuardElicitation", () => {
 // ---------------------------------------------------------------------------
 
 describe("x428Guard — MCP Apps mode", () => {
-  it("registers tool with _meta.ui.resourceUri when client supports apps", () => {
+  it("registers tool immediately", () => {
     const mcpServer = createMockMcpServer(true);
     const handler = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "result" }] });
 
@@ -268,13 +256,11 @@ describe("x428Guard — MCP Apps mode", () => {
       ],
     }, "search", { description: "Search" }, handler);
 
-    mcpServer.triggerInitialized();
-
-    // Tool should be registered
+    // Tool registered immediately (not deferred)
     expect(mcpServer._tools.has("search")).toBe(true);
   });
 
-  it("registers x428/attest tool", () => {
+  it("returns pending structuredContent on first call when apps supported", async () => {
     const mcpServer = createMockMcpServer(true);
     const handler = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "result" }] });
 
@@ -283,45 +269,32 @@ describe("x428Guard — MCP Apps mode", () => {
         { type: "tos", tosVersion: "1.0", documentUrl: "https://example.com/tos", documentHash: "sha256-abc" },
       ],
     }, "search", {}, handler);
-
-    mcpServer.triggerInitialized();
-
-    expect(mcpServer._tools.has("x428/attest")).toBe(true);
-  });
-
-  it("registers ui://x428/guard resource", () => {
-    const mcpServer = createMockMcpServer(true);
-    const handler = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "result" }] });
-
-    x428Guard(mcpServer, {
-      preconditions: [
-        { type: "tos", tosVersion: "1.0", documentUrl: "https://example.com/tos", documentHash: "sha256-abc" },
-      ],
-    }, "search", {}, handler);
-
-    mcpServer.triggerInitialized();
-
-    expect(mcpServer.resource).toHaveBeenCalled();
-    expect(mcpServer._resources.has("ui://x428/guard")).toBe(true);
-  });
-
-  it("returns pending structuredContent on first call", async () => {
-    const mcpServer = createMockMcpServer(true);
-    const handler = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "result" }] });
-
-    x428Guard(mcpServer, {
-      preconditions: [
-        { type: "tos", tosVersion: "1.0", documentUrl: "https://example.com/tos", documentHash: "sha256-abc" },
-      ],
-    }, "search", {}, handler);
-
-    mcpServer.triggerInitialized();
 
     const result = await mcpServer.callTool("search", { query: "test" }, mockExtra());
     expect(result.structuredContent.x428Status).toBe("pending");
     expect(result.structuredContent.toolName).toBe("search");
     expect(result.structuredContent.toolArgs).toEqual({ query: "test" });
     expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("registers x428/attest and resource lazily on first call", async () => {
+    const mcpServer = createMockMcpServer(true);
+    const handler = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "result" }] });
+
+    x428Guard(mcpServer, {
+      preconditions: [
+        { type: "tos", tosVersion: "1.0", documentUrl: "https://example.com/tos", documentHash: "sha256-abc" },
+      ],
+    }, "search", {}, handler);
+
+    // Before first call — only search registered
+    expect(mcpServer._tools.has("x428/attest")).toBe(false);
+
+    // First call triggers lazy registration
+    await mcpServer.callTool("search", {}, mockExtra());
+
+    expect(mcpServer._tools.has("x428/attest")).toBe(true);
+    expect(mcpServer._resources.has("ui://x428/guard")).toBe(true);
   });
 
   it("x428/attest caches token, second call executes handler", async () => {
@@ -333,8 +306,6 @@ describe("x428Guard — MCP Apps mode", () => {
         { type: "tos", tosVersion: "1.0", documentUrl: "https://example.com/tos", documentHash: "sha256-abc" },
       ],
     }, "search", {}, handler);
-
-    mcpServer.triggerInitialized();
 
     const extra = mockExtra("s1");
     // First call → pending
@@ -363,12 +334,7 @@ describe("x428Guard — Elicitation fallback", () => {
       ],
     }, "search", {}, handler);
 
-    mcpServer.triggerInitialized();
-
-    // Should NOT register x428/attest
-    expect(mcpServer._tools.has("x428/attest")).toBe(false);
-
-    // Tool should be registered and use elicitation
+    // Tool registered immediately
     expect(mcpServer._tools.has("search")).toBe(true);
 
     // Call tool — should use elicitation via server.elicitInput
@@ -376,6 +342,9 @@ describe("x428Guard — Elicitation fallback", () => {
     expect(mcpServer.server.elicitInput).toHaveBeenCalled();
     expect(handler).toHaveBeenCalledOnce();
     expect(result.content[0].text).toBe("result");
+
+    // Should NOT register x428/attest
+    expect(mcpServer._tools.has("x428/attest")).toBe(false);
   });
 
   it("caches token and skips elicitation on second call", async () => {
@@ -387,8 +356,6 @@ describe("x428Guard — Elicitation fallback", () => {
         { type: "tos", tosVersion: "1.0", documentUrl: "https://example.com/tos", documentHash: "sha256-abc" },
       ],
     }, "search", {}, handler);
-
-    mcpServer.triggerInitialized();
 
     const extra = mockExtra("e2");
     await mcpServer.callTool("search", {}, extra);
