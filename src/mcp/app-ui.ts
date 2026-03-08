@@ -263,10 +263,10 @@ export function buildAppHtml(): string {
         return;
       }
 
-      // Re-call the original tool — token is now cached
+      // Re-call the original tool — token is now cached by challengeId
       const toolResult = await sendRpc("tools/call", {
         name: sc.toolName,
-        arguments: sc.toolArgs || {}
+        arguments: { ...(sc.toolArgs || {}), _x428ChallengeId: sc.challengeId }
       });
 
       // Show success and the tool result

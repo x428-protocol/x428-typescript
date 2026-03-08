@@ -110,9 +110,19 @@ async function processAttestation(
   return verifyAttestation(challenge, payload, resolver, nonceStore, undefined, tokenTtl);
 }
 
-// Per-server shared state
+// ---------------------------------------------------------------------------
+// Shared challenge store — module-level so it works across MCP sessions.
+// Claude Desktop creates separate AppBridge and Model sessions with different
+// Mcp-Session-Id values (ext-apps#481). The App iframe's tools/call goes
+// through the AppBridge session, not the Model session that originally called
+// the tool. Keying by challengeId (UUID) instead of sessionId lets the
+// x428-attest call find the challenge regardless of which session it arrives on.
+// ---------------------------------------------------------------------------
+const sharedChallenges = new Map<string, PreconditionChallenge>();
+const sharedTokens = new Map<string, AttestationToken>();
+
+// Per-server state (registration flags + capability detection)
 interface ServerState {
-  pendingChallenges: Map<string, PreconditionChallenge>;
   attestToolRegistered: boolean;
   resourceRegistered: boolean;
   /** Raw extensions from client capabilities, captured before Zod strips them. */
@@ -126,7 +136,6 @@ function getServerState(server: McpServerWithInit): ServerState {
   let state = serverStateMap.get(server);
   if (!state) {
     state = {
-      pendingChallenges: new Map(),
       attestToolRegistered: false,
       resourceRegistered: false,
       extensionsCaptured: false,
@@ -196,22 +205,17 @@ function ensureResourceRegistered(server: McpServerWithInit): void {
  */
 function ensureAttestToolRegistered(
   server: McpServerWithInit,
-  pendingChallenges: Map<string, PreconditionChallenge>,
   operatorDid: string,
   privateKey: Uint8Array,
   resolver: DidResolver,
   nonceStore: NonceStore,
   tokenTtl: number,
-  tokenCache: Map<string, AttestationToken>,
-  resourceUri: string,
 ): void {
   const state = getServerState(server);
   if (state.attestToolRegistered) return;
   state.attestToolRegistered = true;
 
-  const attestHandler = async (args: { challengeId: string; accepted: boolean }, extra: McpToolExtra) => {
-    const sessionId = extra.sessionId ?? "_default";
-
+  const attestHandler = async (args: { challengeId: string; accepted: boolean }, _extra: McpToolExtra) => {
     if (!args.accepted) {
       return {
         content: [{ type: "text", text: "x428: User declined preconditions." }],
@@ -219,7 +223,7 @@ function ensureAttestToolRegistered(
       };
     }
 
-    const challenge = pendingChallenges.get(args.challengeId ?? sessionId);
+    const challenge = sharedChallenges.get(args.challengeId);
     if (!challenge) {
       return {
         content: [{ type: "text", text: "x428: No pending challenge found." }],
@@ -239,9 +243,9 @@ function ensureAttestToolRegistered(
         };
       }
 
-      const cacheKey = `${sessionId}:${resourceUri}`;
-      tokenCache.set(cacheKey, result);
-      pendingChallenges.delete(args.challengeId ?? sessionId);
+      // Cache token by challengeId so the re-call from the App can find it
+      sharedTokens.set(args.challengeId, result);
+      sharedChallenges.delete(args.challengeId);
 
       return {
         content: [{ type: "text", text: "x428: Attestation accepted. You may now use the tool." }],
@@ -298,105 +302,62 @@ export function x428Guard(
   handler: (args: any, extra: McpToolExtra) => Promise<any>,
 ): void {
   const tokenTtl = config.tokenTtl ?? 3600;
-  const tokenCache = new Map<string, AttestationToken>();
   const resolver = config.didResolver ?? new DidKeyResolver();
   const nonceStore = config.nonceStore ?? new InMemoryNonceStore();
   const resourceUri = config.resourceUri ?? `x428://mcp/tool/${toolName}`;
   const { did: operatorDid, privateKey } = createEphemeralDid();
   const state = getServerState(mcpServer);
 
-  // Capture raw extensions before Zod strips them
+  // Capture raw extensions before Zod strips them (for future use)
   ensureExtensionsCapture(mcpServer, state);
 
   // Eagerly register shared infrastructure
   ensureResourceRegistered(mcpServer);
   ensureAttestToolRegistered(
-    mcpServer, state.pendingChallenges,
-    operatorDid, privateKey, resolver, nonceStore, tokenTtl, tokenCache, resourceUri,
+    mcpServer, operatorDid, privateKey, resolver, nonceStore, tokenTtl,
   );
 
-  function getCachedToken(sessionId: string): AttestationToken | undefined {
-    const key = `${sessionId}:${resourceUri}`;
-    const cached = tokenCache.get(key);
-    if (cached && new Date(cached.expiresAt) > new Date()) return cached;
-    return undefined;
-  }
-
   const toolCallback = async (args: any, extra: McpToolExtra) => {
-    const sessionId = extra.sessionId ?? "_default";
-    const cached = getCachedToken(sessionId);
-    if (cached) return handler(args, extra);
+    // Check if any cached token exists for this challengeId (passed back
+    // by the App when it re-calls the tool after attestation).
+    // On the re-call, the App sends the original args which may include
+    // a _x428ChallengeId from the first call's structuredContent.
+    const recallChallengeId = args?._x428ChallengeId as string | undefined;
+    if (recallChallengeId) {
+      const cached = sharedTokens.get(recallChallengeId);
+      if (cached && new Date(cached.expiresAt) > new Date()) {
+        // Strip internal field before passing to handler
+        const { _x428ChallengeId: _, ...cleanArgs } = args;
+        return handler(cleanArgs, extra);
+      }
+    }
 
+    // Generate a UUID challengeId for cross-session correlation
+    const challengeId = crypto.randomUUID();
     const challenge = generateChallenge(config.preconditions, resourceUri, { ttlSeconds: 300 });
     const preconditions = challenge.preconditions as PreconditionObject[];
 
-    // Detect client capabilities to choose the right acceptance path.
-    // Claude Desktop sends extensions["io.modelcontextprotocol/ui"] (Apps support).
-    // Inspector sends elicitation capability (checkbox dialogs).
-    // Clients with neither cannot complete precondition acceptance.
+    // Store challenge in shared (module-level) map keyed by challengeId.
+    // This works across Claude Desktop's separate AppBridge and Model
+    // sessions (ext-apps#481).
+    sharedChallenges.set(challengeId, challenge);
+
+    // Always return structuredContent for MCP Apps. The tool is registered
+    // with _meta.ui.resourceUri so Apps-capable hosts render the iframe.
+    // The text content serves as fallback for the model context.
     //
-    // Note: extensions is captured from the raw initialize request before
-    // Zod strips it (SDK bug — ClientCapabilitiesSchema lacks .passthrough()).
-    const clientCaps = mcpServer.server.getClientCapabilities?.() as Record<string, unknown> | null | undefined;
-    const hasElicitation = !!(clientCaps && "elicitation" in clientCaps);
-    const hasApps = !!(state.rawExtensions?.["io.modelcontextprotocol/ui"]);
-    const elicitFn = mcpServer.server.elicitInput;
-
-    if (hasElicitation && elicitFn) {
-      // Elicitation path: prompt user with checkboxes
-      const elicitReq = buildCombinedElicitation(preconditions);
-      let elicitResult: { action: string; content?: Record<string, unknown> };
-      try {
-        elicitResult = await elicitFn.call(mcpServer.server, elicitReq, { requestId: extra.requestId });
-      } catch (err) {
-        return { content: [{ type: "text", text: `x428: Elicitation failed: ${err}` }], isError: true };
-      }
-
-      if (elicitResult.action !== "accept") {
-        return { content: [{ type: "text", text: "x428: User declined precondition(s)." }], isError: true };
-      }
-
-      for (const precondition of preconditions) {
-        const fieldKey = `confirm_${precondition.id}`;
-        const confirmed = elicitResult.content?.[fieldKey]
-          ?? (preconditions.length === 1 && (elicitResult.content?.accept ?? elicitResult.content?.confirm));
-        if (!confirmed) {
-          return { content: [{ type: "text", text: `x428: User did not confirm ${precondition.type} precondition.` }], isError: true };
-        }
-      }
-
-      try {
-        const result = await processAttestation(challenge, operatorDid, privateKey, resolver, nonceStore, tokenTtl);
-        if (result instanceof X428Error) {
-          return { content: [{ type: "text", text: `x428: Attestation failed: ${result.detail}` }], isError: true };
-        }
-        const cacheKey = `${sessionId}:${resourceUri}`;
-        tokenCache.set(cacheKey, result);
-        return handler(args, extra);
-      } catch (err) {
-        return { content: [{ type: "text", text: `x428: Attestation error: ${err}` }], isError: true };
-      }
-    }
-
-    // Apps path: return structuredContent for the App iframe.
-    // Requires client to advertise extensions["io.modelcontextprotocol/ui"].
-    if (!hasApps) {
-      return {
-        content: [{ type: "text", text: `x428: This tool requires precondition acceptance, but the client does not support elicitation or MCP Apps (extensions["io.modelcontextprotocol/ui"]). Cannot proceed.` }],
-        isError: true,
-      };
-    }
-
-    // The host renders the iframe; the App calls x428-attest on acceptance.
-    state.pendingChallenges.set(sessionId, challenge);
-
+    // Capability detection (extensions, elicitation) is captured but not
+    // used for branching — blocked on upstream issues:
+    // - Claude Desktop lacks elicitation (claude-code#2799)
+    // - Multi-session state isolation (ext-apps#481, #458)
+    // - SDK strips extensions (typescript-sdk#1063)
     return {
       content: [{ type: "text", text: `x428: Precondition acceptance required for ${toolName}.` }],
       structuredContent: {
         x428Status: "pending",
         toolName,
         toolArgs: args,
-        challengeId: sessionId,
+        challengeId,
         preconditions: preconditions.map((p) => ({
           type: p.type,
           ...(p.type === "tos" ? { documentUrl: p.documentUrl, tosVersion: p.tosVersion } : {}),
