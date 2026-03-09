@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
-import { x428Guard, x428GuardElicitation } from "../../src/mcp/guard.js";
-import type { McpServerLike, McpToolExtra, McpServerWithInit } from "../../src/mcp/guard.js";
+import { x428Guard, x428GuardElicitation } from "../src/guard.js";
+import type { McpServerLike, McpToolExtra, McpServerWithInit } from "../src/guard.js";
 
 // ---------------------------------------------------------------------------
 // Helpers

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildAppHtml } from "../../src/mcp/app-ui.js";
+import { buildAppHtml } from "../src/app-ui.js";
 
 describe("buildAppHtml", () => {
   it("returns valid HTML document", () => {

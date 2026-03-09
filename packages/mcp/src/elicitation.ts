@@ -1,4 +1,4 @@
-import type { PreconditionObject } from "../core/types.js";
+import type { PreconditionObject } from "@x428/core";
 
 export interface ElicitationRequest {
   mode: "form";

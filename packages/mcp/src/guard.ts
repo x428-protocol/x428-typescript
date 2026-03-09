@@ -3,15 +3,18 @@ import type {
   AttestationObject,
   PreconditionObject,
   PreconditionChallenge,
-} from "../core/types.js";
-import { generateChallenge, type PreconditionConfig } from "../core/challenge.js";
-import { buildAttestation } from "../core/attestation.js";
-import { verifyAttestation } from "../core/verify.js";
-import { X428Error } from "../core/errors.js";
-import type { DidResolver } from "../core/did.js";
-import { DidKeyResolver } from "../core/did.js";
-import type { NonceStore } from "../core/nonce.js";
-import { InMemoryNonceStore } from "../core/nonce.js";
+  PreconditionConfig,
+  DidResolver,
+  NonceStore,
+} from "@x428/core";
+import {
+  generateChallenge,
+  buildAttestation,
+  verifyAttestation,
+  X428Error,
+  DidKeyResolver,
+  InMemoryNonceStore,
+} from "@x428/core";
 import { buildCombinedElicitation } from "./elicitation.js";
 import { createEphemeralDid } from "./ephemeral-did.js";
 import { buildAppHtml } from "./app-ui.js";

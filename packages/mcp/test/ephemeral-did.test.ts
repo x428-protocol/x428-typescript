@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { createEphemeralDid } from "../../src/mcp/ephemeral-did.js";
+import { createEphemeralDid } from "../src/ephemeral-did.js";
 
 describe("createEphemeralDid", () => {
   it("returns a did:key and keypair", () => {
