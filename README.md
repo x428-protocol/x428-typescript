@@ -4,6 +4,18 @@ TypeScript reference implementation of the [x428 Precondition Attestation Protoc
 
 x428 extends HTTP 428 ("Precondition Required") into a challenge-response handshake for AI agents. Servers issue precondition challenges (TOS acceptance, age verification, identity attestation); clients respond with signed attestation payloads.
 
+## Packages
+
+| Package | Description |
+|---------|-------------|
+| [`@x428/core`](packages/core/) | Core protocol — types, JCS canonicalization, signing, verification, token generation, DID resolution |
+| [`@x428/mcp`](packages/mcp/) | MCP transport adapter — guard middleware, elicitation, MCP Apps UI |
+
+```bash
+npm install @x428/core          # core protocol only
+npm install @x428/core @x428/mcp  # core + MCP adapter
+```
+
 ## Development
 
 Conformance test vectors are pulled from the [spec repo](https://github.com/x428-protocol/spec) via a git submodule (pinned to a spec release tag). `make test` will warn if the vectors are behind `origin/main`.
@@ -31,7 +43,7 @@ Gate any MCP tool behind TOS/AGE confirmation:
 
 ```typescript
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { x428Guard } from "x428";
+import { x428Guard } from "@x428/mcp";
 
 const mcpServer = new McpServer({ name: "my-server", version: "1.0.0" });
 
@@ -51,7 +63,7 @@ x428Guard(mcpServer, {
 Or gate all tools at once:
 
 ```typescript
-import { x428Protect } from "x428";
+import { x428Protect } from "@x428/mcp";
 
 x428Protect(mcpServer, {
   preconditions: [
@@ -72,7 +84,7 @@ mcpServer.tool("search", { query: { type: "string" } }, async (args, extra) => {
 **`x428GuardElicitation`** — Elicitation mode. Wraps tool handlers with `elicitInput()` confirmation dialogs. For clients that support MCP elicitation but not Apps (MCP Inspector Tools tab).
 
 ```typescript
-import { x428Guard, x428GuardElicitation } from "x428";
+import { x428Guard, x428GuardElicitation } from "@x428/mcp";
 
 // Apps mode — registers tool with inline UI
 x428Guard(mcpServer, { preconditions: [...] }, "search", { ... }, handler);
@@ -131,7 +143,7 @@ import {
   validateToken,
   DidKeyResolver,
   InMemoryNonceStore,
-} from "x428";
+} from "@x428/core";
 
 // Generate a challenge
 const challenge = generateChallenge(
@@ -151,7 +163,7 @@ const result = await verifyAttestation(challenge, payload, resolver, nonceStore)
 ### Client-side
 
 ```typescript
-import { buildAttestation } from "x428";
+import { buildAttestation } from "@x428/core";
 
 const payload = buildAttestation(
   challenge,
@@ -164,7 +176,7 @@ const payload = buildAttestation(
 ### Token Scope Matching
 
 ```typescript
-import { scopeMatches, validateToken } from "x428";
+import { scopeMatches, validateToken } from "@x428/core";
 
 scopeMatches("https://example.com/api/*", "https://example.com/api/data"); // true
 scopeMatches("https://example.com/api/*", "https://example.com/api/v2/data"); // false
@@ -206,10 +218,14 @@ Implementing full RDFC-1.0 requires a JSON-LD processor dependency. See [#1](htt
 
 ## Dependencies
 
+### @x428/core
 - `@noble/curves` — Ed25519 (audited, no native deps)
 - `canonicalize` — JCS (RFC 8785)
-- `@modelcontextprotocol/sdk` — optional peer dependency (only needed for MCP guard)
-- `@modelcontextprotocol/ext-apps` — optional peer dependency (enables rich inline UI for MCP Apps-capable clients)
+
+### @x428/mcp
+- `@x428/core`
+- `@modelcontextprotocol/sdk` — optional peer dependency (MCP server)
+- `@modelcontextprotocol/ext-apps` — optional peer dependency (rich inline UI)
 
 ## License
 

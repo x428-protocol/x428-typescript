@@ -5,7 +5,7 @@
  * the same set of tools with the same precondition configurations.
  */
 import { z } from "zod";
-import type { PreconditionConfig } from "../src/core/challenge.js";
+import type { PreconditionConfig } from "@x428/core";
 
 export interface DemoTool {
   name: string;

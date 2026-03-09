@@ -20,7 +20,7 @@ import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { x428Guard } from "../src/mcp/guard.js";
+import { x428Guard } from "@x428/mcp";
 import { DEMO_TOOLS } from "./demo-tools.js";
 
 const log = (...args: unknown[]) => process.stderr.write(`[x428-demo] ${args.map(String).join(" ")}\n`);

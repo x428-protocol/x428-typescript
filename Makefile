@@ -21,15 +21,15 @@ check-vectors:
 
 ## Run tests (warns if vectors are stale)
 test: setup check-vectors
-	npx vitest run
+	npm test
 
 ## Type check
 typecheck:
-	npx tsc --noEmit
+	npm run typecheck
 
 ## Build
 build:
-	npx tsc
+	npm run build
 
 ## Pull latest conformance vectors from spec repo
 update-vectors:
@@ -49,4 +49,4 @@ demo-apps:
 
 ## Clean build artifacts
 clean:
-	rm -rf dist
+	rm -rf packages/core/dist packages/mcp/dist

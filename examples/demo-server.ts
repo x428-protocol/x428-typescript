@@ -14,7 +14,7 @@
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { x428GuardElicitation } from "../src/mcp/guard.js";
+import { x428GuardElicitation } from "@x428/mcp";
 import { DEMO_TOOLS } from "./demo-tools.js";
 
 const server = new McpServer({
