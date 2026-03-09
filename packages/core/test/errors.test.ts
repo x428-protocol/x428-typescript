@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { X428Error } from "../../src/core/errors.js";
+import { X428Error } from "../src/errors.js";
 
 describe("X428Error", () => {
   it("constructs with code and detail", () => {

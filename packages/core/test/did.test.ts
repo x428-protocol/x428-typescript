@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { DidKeyResolver, StaticDidResolver } from "../../src/core/did.js";
-import type { DidDocument } from "../../src/core/types.js";
+import { DidKeyResolver, StaticDidResolver } from "../src/did.js";
+import type { DidDocument } from "../src/types.js";
 
 const VALID_OPERATOR_DID =
   "did:key:z6MkneMkZqwqRiU5mJzSG3kDwzt9P8C59N4NGTfBLfSGE7c7";

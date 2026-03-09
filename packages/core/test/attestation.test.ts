@@ -1,8 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { ed25519 } from "@noble/curves/ed25519.js";
-import { buildAttestation } from "../../src/core/attestation.js";
-import { verifyPayloadSignature } from "../../src/core/signing.js";
-import type { PreconditionChallenge, AttestationObject } from "../../src/core/types.js";
+import { buildAttestation } from "../src/attestation.js";
+import { verifyPayloadSignature } from "../src/signing.js";
+import type { PreconditionChallenge, AttestationObject } from "../src/types.js";
 
 describe("buildAttestation", () => {
   // Deterministic test seed

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { generateChallenge } from "../../src/core/challenge.js";
-import type { PreconditionConfig } from "../../src/core/challenge.js";
+import { generateChallenge } from "../src/challenge.js";
+import type { PreconditionConfig } from "../src/challenge.js";
 
 describe("generateChallenge", () => {
   it("creates a valid challenge with required fields", () => {

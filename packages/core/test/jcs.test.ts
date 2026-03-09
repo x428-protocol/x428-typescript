@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { jcsCanonical, jcsCanonicalHex } from "../../src/core/jcs.js";
+import { jcsCanonical, jcsCanonicalHex } from "../src/jcs.js";
 import vectors from "@x428-vectors/jcs.json";
 
 describe("JCS canonicalization", () => {

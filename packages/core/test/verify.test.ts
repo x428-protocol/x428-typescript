@@ -1,9 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { verifyAttestation } from "../../src/core/verify.js";
-import { StaticDidResolver } from "../../src/core/did.js";
-import { InMemoryNonceStore } from "../../src/core/nonce.js";
-import { X428Error } from "../../src/core/errors.js";
-import type { AttestationToken } from "../../src/core/types.js";
+import { verifyAttestation } from "../src/verify.js";
+import { StaticDidResolver } from "../src/did.js";
+import { InMemoryNonceStore } from "../src/nonce.js";
+import { X428Error } from "../src/errors.js";
+import type { AttestationToken } from "../src/types.js";
 
 import verifyCommonVectors from "@x428-vectors/verify-common.json";
 import verifyTosVectors from "@x428-vectors/verify-tos.json";
