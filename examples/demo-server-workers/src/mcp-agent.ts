@@ -28,7 +28,7 @@ export class X428McpAgent extends McpAgent<Env, {}, {}> {
 
     for (const tool of DEMO_TOOLS) {
       x428Guard(
-        this.server,
+        this.server as any,
         {
           preconditions: tool.preconditions,
           resourceUri: tool.resourceUri,
