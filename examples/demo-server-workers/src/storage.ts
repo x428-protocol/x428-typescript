@@ -117,40 +117,54 @@ export class DualTokenStore implements TokenStore {
 /**
  * Dual-write accepted precondition store.
  *
- * Scoped by sessionId — each MCP session must accept preconditions
- * independently. This is correct for a public multi-user demo server
- * where different sessions represent different users/agents.
- *
- * For Claude Desktop's multi-DO architecture (AppBridge + Model in
- * separate DOs), both sessions get their own acceptance flow.
+ * Two scoping strategies:
+ * - `"session"`: Each MCP session accepts independently. Correct for
+ *   multi-user servers where sessions represent different users.
+ * - `"global"`: All sessions share acceptance state. Correct for
+ *   single-user setups or when the user is present for interactive
+ *   confirmation (elicitation). Also works around Claude Desktop's
+ *   multi-DO architecture (AppBridge + Model in separate DOs).
  */
 export class DualAcceptedPreconditionStore implements AcceptedPreconditionStore {
   private memory = new Map<string, Set<string>>();
 
-  constructor(private kv: KVNamespace, private prefix = "x428:accepted:", private ttlSeconds = 86400) {}
+  constructor(
+    private kv: KVNamespace,
+    private prefix = "x428:accepted:",
+    private ttlSeconds = 86400,
+    private scope: "session" | "global" = "global",
+  ) {}
+
+  private kvKey(sessionId: string): string {
+    return this.prefix + (this.scope === "global" ? "global" : sessionId);
+  }
+
+  private memKey(sessionId: string): string {
+    return this.scope === "global" ? "global" : sessionId;
+  }
 
   async getAccepted(sessionId: string): Promise<Set<string>> {
-    // In-memory first (same-DO, instant)
-    const local = this.memory.get(sessionId);
+    const mk = this.memKey(sessionId);
+    const local = this.memory.get(mk);
     if (local && local.size > 0) return new Set(local);
 
-    // Fall back to KV (cross-request persistence for same session)
-    const raw = await this.kv.get(this.prefix + sessionId);
+    const raw = await this.kv.get(this.kvKey(sessionId));
     if (!raw) return new Set();
     return new Set(JSON.parse(raw));
   }
 
   async addAll(sessionId: string, keys: string[]): Promise<void> {
-    let set = this.memory.get(sessionId);
-    if (!set) { set = new Set(); this.memory.set(sessionId, set); }
+    const mk = this.memKey(sessionId);
+    let set = this.memory.get(mk);
+    if (!set) { set = new Set(); this.memory.set(mk, set); }
     for (const k of keys) set.add(k);
 
-    // Merge with KV for same-session persistence across requests
-    const raw = await this.kv.get(this.prefix + sessionId);
+    const kk = this.kvKey(sessionId);
+    const raw = await this.kv.get(kk);
     const existing: string[] = raw ? JSON.parse(raw) : [];
     const merged = new Set(existing);
     for (const k of keys) merged.add(k);
-    await this.kv.put(this.prefix + sessionId, JSON.stringify([...merged]), {
+    await this.kv.put(kk, JSON.stringify([...merged]), {
       expirationTtl: this.ttlSeconds,
     });
   }
