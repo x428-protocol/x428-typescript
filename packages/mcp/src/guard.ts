@@ -96,6 +96,10 @@ export interface X428Config {
   challengeStore?: ChallengeStore;
   tokenStore?: TokenStore;
   acceptedPreconditionStore?: AcceptedPreconditionStore;
+  /** When both Apps and elicitation are supported. Default: "apps". */
+  preferredMode?: "apps" | "elicitation";
+  /** When neither Apps nor elicitation is supported. Default: "reject". */
+  fallbackMode?: "reject" | "apps" | "elicitation";
   /** Called after successful attestation verification. */
   onAttestation?: (entry: {
     challengeId: string;
@@ -424,6 +428,29 @@ function ensureAttestToolRegistered(server: McpServerWithInit): void {
 }
 
 // ---------------------------------------------------------------------------
+// Mode detection
+// ---------------------------------------------------------------------------
+
+export type GuardMode = "apps" | "elicitation" | "reject";
+
+function detectMode(
+  mcpServer: McpServerWithInit,
+  state: ServerState,
+  config: X428Config,
+): GuardMode {
+  const caps = mcpServer.server.getClientCapabilities?.() ?? {};
+  const hasElicitation = !!(caps as any).elicitation;
+  const hasApps = !!state.rawExtensions;
+
+  if (hasApps && hasElicitation) {
+    return config.preferredMode ?? "apps";
+  }
+  if (hasApps) return "apps";
+  if (hasElicitation) return "elicitation";
+  return config.fallbackMode ?? "reject";
+}
+
+// ---------------------------------------------------------------------------
 // x428Guard — MCP Apps guard
 // ---------------------------------------------------------------------------
 
@@ -468,28 +495,12 @@ export function x428Guard(
   ensureResourceRegistered(mcpServer);
   ensureAttestToolRegistered(mcpServer);
 
-  const toolCallback = async (args: any, extra: McpToolExtra) => {
+  const handleApps = async (
+    args: any,
+    extra: McpToolExtra,
+    remainingPreconditions: PreconditionConfig[],
+  ) => {
     const sessionId = extra.sessionId ?? "_default";
-    const cacheKey = `${sessionId}:${resourceUri}`;
-
-    // Check token cache — works for re-calls from the App iframe
-    const cached = await state.tokenStore.get(cacheKey);
-    if (cached && new Date(cached.expiresAt) > new Date()) {
-      return handler(args, extra);
-    }
-
-    // Filter to only unattested preconditions (consent is per-precondition,
-    // not per-tool — accepting TOS for search also satisfies TOS for info).
-    const accepted = await state.acceptedPreconditionStore.getAccepted(sessionId);
-    const remainingPreconditions = accepted.size > 0
-      ? config.preconditions.filter((pc) => !accepted.has(preconditionKey(pc)))
-      : config.preconditions;
-
-    // All preconditions already accepted → run handler directly
-    if (remainingPreconditions.length === 0) {
-      return handler(args, extra);
-    }
-
     const challengeId = crypto.randomUUID();
     const challenge = generateChallenge(remainingPreconditions, resourceUri, { ttlSeconds: 300 });
     const preconditions = challenge.preconditions as PreconditionObject[];
@@ -525,6 +536,132 @@ export function x428Guard(
       },
       _meta: UI_META,
     };
+  };
+
+  const handleElicitation = async (
+    args: any,
+    extra: McpToolExtra,
+    remainingPreconditions: PreconditionConfig[],
+  ) => {
+    const sessionId = extra.sessionId ?? "_default";
+    const elicitFn = mcpServer.server.elicitInput;
+    if (!elicitFn) {
+      return {
+        content: [{ type: "text", text: "x428: Server does not support elicitation." }],
+        isError: true,
+      };
+    }
+
+    const resolver = new DidKeyResolver();
+    const nonceStore = new InMemoryNonceStore();
+    const challenge = generateChallenge(remainingPreconditions, resourceUri, { ttlSeconds: 300 });
+    const preconditions = challenge.preconditions as PreconditionObject[];
+    const elicitReq = buildCombinedElicitation(preconditions);
+
+    let elicitResult: { action: string; content?: Record<string, unknown> };
+    try {
+      elicitResult = await elicitFn.call(mcpServer.server, elicitReq, { requestId: extra.requestId });
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `x428: Elicitation failed: ${err}` }],
+        isError: true,
+      };
+    }
+
+    if (elicitResult.action !== "accept") {
+      return {
+        content: [{ type: "text", text: "x428: User declined precondition(s)." }],
+        isError: true,
+      };
+    }
+
+    // Validate all precondition fields were confirmed
+    for (const precondition of preconditions) {
+      const fieldKey = `confirm_${precondition.id}`;
+      const confirmed = elicitResult.content?.[fieldKey]
+        ?? (preconditions.length === 1 && (elicitResult.content?.accept ?? elicitResult.content?.confirm));
+      if (!confirmed) {
+        return {
+          content: [{ type: "text", text: `x428: User did not confirm ${precondition.type} precondition.` }],
+          isError: true,
+        };
+      }
+    }
+
+    try {
+      const result = await processAttestation(challenge, operatorDid, privateKey, resolver, nonceStore, tokenTtl);
+      if (result instanceof X428Error) {
+        return {
+          content: [{ type: "text", text: `x428: Attestation verification failed: ${result.detail}` }],
+          isError: true,
+        };
+      }
+
+      // Cache token by sessionId + resourceUri
+      const cacheKey = `${sessionId}:${resourceUri}`;
+      await state.tokenStore.set(cacheKey, result);
+
+      // Record accepted preconditions in shared store
+      const acceptedKeys = config.preconditions.map((pc) => preconditionKey(pc));
+      await state.acceptedPreconditionStore.addAll(sessionId, acceptedKeys);
+
+      // Fire onAttestation callback
+      if (config.onAttestation) {
+        const challengeId = crypto.randomUUID();
+        config.onAttestation({
+          challengeId,
+          sessionId,
+          operatorDid,
+          attestations: buildAttestationsFromChallenge(challenge),
+        });
+      }
+
+      return handler(args, extra);
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `x428: Attestation error: ${err}` }],
+        isError: true,
+      };
+    }
+  };
+
+  const toolCallback = async (args: any, extra: McpToolExtra) => {
+    const sessionId = extra.sessionId ?? "_default";
+    const cacheKey = `${sessionId}:${resourceUri}`;
+
+    // Check token cache — works for re-calls from the App iframe
+    const cached = await state.tokenStore.get(cacheKey);
+    if (cached && new Date(cached.expiresAt) > new Date()) {
+      return handler(args, extra);
+    }
+
+    // Filter to only unattested preconditions (consent is per-precondition,
+    // not per-tool — accepting TOS for search also satisfies TOS for info).
+    const accepted = await state.acceptedPreconditionStore.getAccepted(sessionId);
+    const remainingPreconditions = accepted.size > 0
+      ? config.preconditions.filter((pc) => !accepted.has(preconditionKey(pc)))
+      : config.preconditions;
+
+    // All preconditions already accepted → run handler directly
+    if (remainingPreconditions.length === 0) {
+      return handler(args, extra);
+    }
+
+    // Detect mode based on client capabilities
+    const mode = detectMode(mcpServer, state, config);
+
+    if (mode === "reject") {
+      return {
+        content: [{ type: "text", text: "x428: Precondition acceptance required but client does not support Apps or elicitation." }],
+        isError: true,
+      };
+    }
+
+    if (mode === "elicitation") {
+      return handleElicitation(args, extra, remainingPreconditions);
+    }
+
+    return handleApps(args, extra, remainingPreconditions);
   };
 
   // Use registerTool for _meta.ui support, fall back to tool() for compat

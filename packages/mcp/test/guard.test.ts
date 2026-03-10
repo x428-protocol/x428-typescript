@@ -355,14 +355,14 @@ describe("x428Guard — MCP Apps mode", () => {
 });
 
 // ---------------------------------------------------------------------------
-// x428Guard — always returns Apps path regardless of capabilities
+// x428Guard — mode detection behavior
 // ---------------------------------------------------------------------------
 
-describe("x428Guard — capability-independent behavior", () => {
-  it("returns structuredContent even when client has elicitation capability", async () => {
+describe("x428Guard — mode detection", () => {
+  it("uses elicitation when client supports elicitation but not apps", async () => {
     const mcpServer = createMockMcpServer();
     mcpServer.server.getClientCapabilities = vi.fn().mockReturnValue({ elicitation: {} });
-    const handler = vi.fn();
+    const handler = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "result" }] });
 
     x428Guard(mcpServer, {
       preconditions: [
@@ -370,14 +370,16 @@ describe("x428Guard — capability-independent behavior", () => {
       ],
     }, "search", {}, handler);
 
+    // Do NOT call simulateInitialize — no extensions → no apps support
     const result = await mcpServer.callTool("search", { q: "test" }, mockExtra("e1"));
-    // Always returns structuredContent (Apps path), never uses elicitation
-    expect(result.structuredContent.x428Status).toBe("pending");
-    expect(handler).not.toHaveBeenCalled();
-    expect(mcpServer.server.elicitInput).not.toHaveBeenCalled();
+    // Should use elicitation path, not structuredContent
+    expect(result.structuredContent).toBeUndefined();
+    expect(mcpServer.server.elicitInput).toHaveBeenCalledOnce();
+    expect(handler).toHaveBeenCalledOnce();
+    expect(result.content[0].text).toBe("result");
   });
 
-  it("returns structuredContent when client has no capabilities at all", async () => {
+  it("uses apps when client supports apps but not elicitation", async () => {
     const mcpServer = createMockMcpServer();
     mcpServer.server.getClientCapabilities = vi.fn().mockReturnValue({});
     const handler = vi.fn();
@@ -388,10 +390,104 @@ describe("x428Guard — capability-independent behavior", () => {
       ],
     }, "search", {}, handler);
 
-    const result = await mcpServer.callTool("search", {}, mockExtra("e2"));
-    // Still returns structuredContent — host decides whether to render App
+    await mcpServer.simulateInitialize();
+    const result = await mcpServer.callTool("search", { q: "test" }, mockExtra("e2"));
+    // Should use apps path (structuredContent)
     expect(result.structuredContent.x428Status).toBe("pending");
     expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("prefers apps when both are supported (default preferredMode)", async () => {
+    const mcpServer = createMockMcpServer();
+    mcpServer.server.getClientCapabilities = vi.fn().mockReturnValue({ elicitation: {} });
+    const handler = vi.fn();
+
+    x428Guard(mcpServer, {
+      preconditions: [
+        { type: "tos", tosVersion: "1.0", documentUrl: "https://example.com/tos", documentHash: "sha256-abc" },
+      ],
+    }, "search", {}, handler);
+
+    await mcpServer.simulateInitialize();
+    const result = await mcpServer.callTool("search", { q: "test" }, mockExtra("e3"));
+    // Both supported, default preferredMode is "apps"
+    expect(result.structuredContent.x428Status).toBe("pending");
+    expect(mcpServer.server.elicitInput).not.toHaveBeenCalled();
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("prefers elicitation when preferredMode is 'elicitation' and both supported", async () => {
+    const mcpServer = createMockMcpServer();
+    mcpServer.server.getClientCapabilities = vi.fn().mockReturnValue({ elicitation: {} });
+    const handler = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "result" }] });
+
+    x428Guard(mcpServer, {
+      preconditions: [
+        { type: "tos", tosVersion: "1.0", documentUrl: "https://example.com/tos", documentHash: "sha256-abc" },
+      ],
+      preferredMode: "elicitation",
+    }, "search", {}, handler);
+
+    await mcpServer.simulateInitialize();
+    const result = await mcpServer.callTool("search", { q: "test" }, mockExtra("e4"));
+    // Should use elicitation even though apps is available
+    expect(result.structuredContent).toBeUndefined();
+    expect(mcpServer.server.elicitInput).toHaveBeenCalledOnce();
+    expect(handler).toHaveBeenCalledOnce();
+  });
+
+  it("rejects when neither supported and fallbackMode is 'reject' (default)", async () => {
+    const mcpServer = createMockMcpServer();
+    mcpServer.server.getClientCapabilities = vi.fn().mockReturnValue({});
+    const handler = vi.fn();
+
+    x428Guard(mcpServer, {
+      preconditions: [
+        { type: "tos", tosVersion: "1.0", documentUrl: "https://example.com/tos", documentHash: "sha256-abc" },
+      ],
+    }, "search", {}, handler);
+
+    // No simulateInitialize → no apps; no elicitation in caps → neither supported
+    const result = await mcpServer.callTool("search", {}, mockExtra("e5"));
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("does not support Apps or elicitation");
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("uses apps as fallback when fallbackMode is 'apps'", async () => {
+    const mcpServer = createMockMcpServer();
+    mcpServer.server.getClientCapabilities = vi.fn().mockReturnValue({});
+    const handler = vi.fn();
+
+    x428Guard(mcpServer, {
+      preconditions: [
+        { type: "tos", tosVersion: "1.0", documentUrl: "https://example.com/tos", documentHash: "sha256-abc" },
+      ],
+      fallbackMode: "apps",
+    }, "search", {}, handler);
+
+    // No simulateInitialize, no elicitation → neither supported, fallback to apps
+    const result = await mcpServer.callTool("search", {}, mockExtra("e6"));
+    expect(result.structuredContent.x428Status).toBe("pending");
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("uses elicitation as fallback when fallbackMode is 'elicitation'", async () => {
+    const mcpServer = createMockMcpServer();
+    mcpServer.server.getClientCapabilities = vi.fn().mockReturnValue({});
+    const handler = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "result" }] });
+
+    x428Guard(mcpServer, {
+      preconditions: [
+        { type: "tos", tosVersion: "1.0", documentUrl: "https://example.com/tos", documentHash: "sha256-abc" },
+      ],
+      fallbackMode: "elicitation",
+    }, "search", {}, handler);
+
+    // No simulateInitialize, no elicitation cap → neither supported, fallback to elicitation
+    const result = await mcpServer.callTool("search", {}, mockExtra("e7"));
+    expect(mcpServer.server.elicitInput).toHaveBeenCalledOnce();
+    expect(handler).toHaveBeenCalledOnce();
   });
 
   it("cross-session: attest on AppBridge, re-call on same AppBridge session", async () => {
@@ -403,6 +499,8 @@ describe("x428Guard — capability-independent behavior", () => {
         { type: "tos", tosVersion: "1.0", documentUrl: "https://example.com/tos", documentHash: "sha256-abc" },
       ],
     }, "search", {}, handler);
+
+    await mcpServer.simulateInitialize();
 
     // Model session calls tool → gets challengeId
     const pending = await mcpServer.callTool("search", { q: "hi" }, mockExtra("model-session"));
