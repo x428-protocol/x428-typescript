@@ -455,14 +455,19 @@ function detectMode(
 // ---------------------------------------------------------------------------
 
 /**
- * Register a single MCP tool with x428 precondition enforcement via MCP Apps.
+ * Register a single MCP tool with x428 precondition enforcement.
  *
- * Returns `structuredContent` with precondition data and `_meta.ui.resourceUri`.
- * Apps-capable hosts (Claude Desktop, Inspector Apps tab) render an inline
- * iframe for acceptance; the App calls `x428-attest` then re-calls the tool.
+ * Auto-detects client capabilities at call time and selects the appropriate
+ * interaction mode:
+ * - **Apps**: Returns `structuredContent` with `_meta.ui.resourceUri` for
+ *   inline iframe rendering. The App calls `x428-attest` to confirm.
+ * - **Elicitation**: Uses `server.elicitInput()` to present confirmation
+ *   dialogs inline within the same tool call.
+ * - **Reject**: Returns an error indicating the client lacks support.
  *
- * For clients that support elicitation but not Apps (e.g. Inspector Tools tab),
- * use `x428GuardElicitation` instead.
+ * When both Apps and elicitation are available, `config.preferredMode`
+ * controls which is used (default: `"apps"`). When neither is available,
+ * `config.fallbackMode` determines behavior (default: `"reject"`).
  *
  * All tools on a server share the same stores (ChallengeStore, TokenStore,
  * AcceptedPreconditionStore). Stores are set from the first x428Guard call's
@@ -543,6 +548,11 @@ export function x428Guard(
     extra: McpToolExtra,
     remainingPreconditions: PreconditionConfig[],
   ) => {
+    // Unlike handleApps, the elicitation path does not store or delete from
+    // the challenge store. Elicitation is synchronous within this call:
+    // challenge generation, user confirmation via elicitInput(), and
+    // attestation verification all complete before returning, so there is
+    // no need for cross-session challenge lookup.
     const sessionId = extra.sessionId ?? "_default";
     const elicitFn = mcpServer.server.elicitInput;
     if (!elicitFn) {
