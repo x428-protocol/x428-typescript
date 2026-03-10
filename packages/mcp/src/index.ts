@@ -1,5 +1,5 @@
 export { x428Guard, x428GuardElicitation } from "./guard.js";
-export type { X428Config, McpServerLike, McpToolExtra, McpServerWithInit, ChallengeStore, TokenStore } from "./guard.js";
+export type { X428Config, McpServerLike, McpToolExtra, McpServerWithInit, ChallengeStore, ChallengeRecord, TokenStore, AcceptedPreconditionStore } from "./guard.js";
 export { x428Protect } from "./middleware.js";
 export { buildElicitation, buildCombinedElicitation } from "./elicitation.js";
 export { buildAppHtml } from "./app-ui.js";

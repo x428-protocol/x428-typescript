@@ -252,14 +252,9 @@ export function buildAppHtml(): string {
       // Call the hidden x428-attest tool to build + verify attestation.
       // Include challengeData for cross-session support (Claude Desktop
       // uses separate DOs for AppBridge and Model sessions).
-      const attestArgs = {
-        challengeId: sc.challengeId,
-        accepted: true
-      };
-      if (sc.challengeData) attestArgs.challengeData = sc.challengeData;
       const attestResult = await sendRpc("tools/call", {
         name: "x428-attest",
-        arguments: attestArgs
+        arguments: { challengeId: sc.challengeId, accepted: true }
       });
 
       if (attestResult.isError) {

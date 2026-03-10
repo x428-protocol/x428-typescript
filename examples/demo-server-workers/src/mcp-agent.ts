@@ -2,16 +2,17 @@ import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { x428Guard } from "@x428/mcp";
 import {
-  initTables,
-  SqliteNonceStore,
-  SqliteChallengeStore,
-  SqliteTokenStore,
+  KvChallengeStore,
+  KvTokenStore,
+  KvAcceptedPreconditionStore,
+  initAuditTable,
   SqliteAuditLog,
 } from "./storage.js";
 import { DEMO_TOOLS } from "./demo-tools.js";
 
 interface Env {
   MCP_OBJECT: DurableObjectNamespace;
+  X428_KV: KVNamespace;
 }
 
 export class X428McpAgent extends McpAgent<Env, {}, {}> {
@@ -21,12 +22,14 @@ export class X428McpAgent extends McpAgent<Env, {}, {}> {
   });
 
   async init() {
-    const sql = this.ctx.storage.sql;
-    initTables(sql as any);
+    // KV-backed stores — shared across all DOs (cross-session)
+    const challengeStore = new KvChallengeStore(this.env.X428_KV);
+    const tokenStore = new KvTokenStore(this.env.X428_KV);
+    const acceptedPreconditionStore = new KvAcceptedPreconditionStore(this.env.X428_KV);
 
-    const nonceStore = new SqliteNonceStore(sql as any);
-    const challengeStore = new SqliteChallengeStore(sql as any);
-    const tokenStore = new SqliteTokenStore(sql as any);
+    // SQLite audit log — per-DO, append-only
+    const sql = this.ctx.storage.sql;
+    initAuditTable(sql as any);
     const auditLog = new SqliteAuditLog(sql as any);
 
     for (const tool of DEMO_TOOLS) {
@@ -35,9 +38,9 @@ export class X428McpAgent extends McpAgent<Env, {}, {}> {
         {
           preconditions: tool.preconditions,
           resourceUri: tool.resourceUri,
-          nonceStore,
           challengeStore,
           tokenStore,
+          acceptedPreconditionStore,
           onAttestation: (entry) => auditLog.append({ ...entry, signature: "" }),
         },
         tool.name,

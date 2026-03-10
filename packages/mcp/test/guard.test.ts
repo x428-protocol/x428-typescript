@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { x428Guard, x428GuardElicitation } from "../src/guard.js";
-import type { McpServerLike, McpToolExtra, McpServerWithInit, ChallengeStore, TokenStore } from "../src/guard.js";
+import type { McpServerLike, McpToolExtra, McpServerWithInit, ChallengeStore, ChallengeRecord, TokenStore } from "../src/guard.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -430,12 +430,12 @@ describe("x428Guard — capability-independent behavior", () => {
 
 describe("x428Guard — pluggable stores", () => {
   it("uses custom challengeStore and tokenStore when provided", async () => {
-    const challenges = new Map<string, any>();
+    const challenges = new Map<string, ChallengeRecord>();
     const tokens = new Map<string, any>();
 
     const customChallengeStore: ChallengeStore = {
       get: vi.fn((id) => challenges.get(id) ?? null),
-      set: vi.fn((id, challenge) => { challenges.set(id, challenge); }),
+      set: vi.fn((id: string, record: ChallengeRecord) => { challenges.set(id, record); }),
       delete: vi.fn((id) => { challenges.delete(id); }),
     };
 

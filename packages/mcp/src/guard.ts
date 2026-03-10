@@ -24,6 +24,9 @@ import { z } from "zod";
 // Types
 // ---------------------------------------------------------------------------
 
+/** Allow store methods to return sync or async values. */
+type MaybePromise<T> = T | Promise<T>;
+
 /**
  * Minimal interface for the low-level MCP Server (McpServer.server).
  */
@@ -42,17 +45,44 @@ export interface McpToolExtra {
   [key: string]: unknown;
 }
 
-/** Persistent challenge store (replaces module-level Map). */
-export interface ChallengeStore {
-  get(challengeId: string): PreconditionChallenge | null;
-  set(challengeId: string, challenge: PreconditionChallenge, ttlMs?: number): void;
-  delete(challengeId: string): void;
+/**
+ * Bundled challenge + crypto context.
+ * Stored in ChallengeStore for cross-session lookup (e.g., KV-backed).
+ */
+export interface ChallengeRecord {
+  challenge: PreconditionChallenge;
+  operatorDid: string;
+  privateKey: Uint8Array;
+  tokenTtl: number;
+  resourceUri: string;
+  preconditionConfigs: PreconditionConfig[];
 }
 
-/** Persistent token store (replaces module-level Map). */
+/**
+ * Persistent challenge store.
+ * Stores full ChallengeRecord (challenge + crypto context) so the
+ * x428-attest handler can verify from any session (cross-session KV).
+ */
+export interface ChallengeStore {
+  get(challengeId: string): MaybePromise<ChallengeRecord | null>;
+  set(challengeId: string, record: ChallengeRecord, ttlMs?: number): MaybePromise<void>;
+  delete(challengeId: string): MaybePromise<void>;
+}
+
+/** Persistent token store. */
 export interface TokenStore {
-  get(cacheKey: string): AttestationToken | null;
-  set(cacheKey: string, token: AttestationToken): void;
+  get(cacheKey: string): MaybePromise<AttestationToken | null>;
+  set(cacheKey: string, token: AttestationToken): MaybePromise<void>;
+}
+
+/**
+ * Tracks accepted preconditions across sessions.
+ * With a KV-backed implementation, consent recorded on one session
+ * (e.g., AppBridge) is visible from another (e.g., Model).
+ */
+export interface AcceptedPreconditionStore {
+  getAccepted(sessionId: string): MaybePromise<Set<string>>;
+  addAll(sessionId: string, keys: string[]): MaybePromise<void>;
 }
 
 export interface X428Config {
@@ -65,6 +95,7 @@ export interface X428Config {
   nonceStore?: NonceStore;
   challengeStore?: ChallengeStore;
   tokenStore?: TokenStore;
+  acceptedPreconditionStore?: AcceptedPreconditionStore;
   /** Called after successful attestation verification. */
   onAttestation?: (entry: {
     challengeId: string;
@@ -136,23 +167,16 @@ async function processAttestation(
 }
 
 // ---------------------------------------------------------------------------
-// Shared pending context — module-level so it works across MCP sessions.
-// Claude Desktop creates separate AppBridge and Model sessions with different
-// Mcp-Session-Id values (ext-apps#481). The App iframe's tools/call goes
-// through the AppBridge session, not the Model session that originally called
-// the tool. Keying by challengeId (UUID) instead of sessionId lets the
-// x428-attest call find the context regardless of which session it arrives on.
+// Default in-memory stores
 // ---------------------------------------------------------------------------
 
-/** Pending challenges, keyed by challengeId (UUID) for cross-session lookup. */
-const sharedChallenges = new Map<string, PreconditionChallenge>();
-
-/** Attestation tokens, keyed by "sessionId:resourceUri" for standard lookup. */
+const sharedChallenges = new Map<string, ChallengeRecord>();
 const sharedTokens = new Map<string, AttestationToken>();
+const sharedAccepted = new Map<string, Set<string>>();
 
 const defaultChallengeStore: ChallengeStore = {
   get: (id) => sharedChallenges.get(id) ?? null,
-  set: (id, challenge) => { sharedChallenges.set(id, challenge); },
+  set: (id, record) => { sharedChallenges.set(id, record); },
   delete: (id) => { sharedChallenges.delete(id); },
 };
 
@@ -161,45 +185,14 @@ const defaultTokenStore: TokenStore = {
   set: (key, token) => { sharedTokens.set(key, token); },
 };
 
-/** Per-challenge crypto context so the shared attest handler can verify any tool's challenge. */
-interface ChallengeContext {
-  operatorDid: string;
-  privateKey: Uint8Array;
-  resolver: DidResolver;
-  nonceStore: NonceStore;
-  tokenTtl: number;
-  resourceUri: string;
-  challengeStore: ChallengeStore;
-  tokenStore: TokenStore;
-  onAttestation?: X428Config["onAttestation"];
-  /** Original precondition configs, used to mark them as accepted. */
-  preconditionConfigs: PreconditionConfig[];
-}
-
-/**
- * Serializable challenge data for cross-session lookup (Claude Desktop).
- * Contains only plain data — no DO-specific store references that would
- * cause "Cannot perform I/O on behalf of a different Durable Object".
- */
-interface CrossSessionChallengeData {
-  challenge: PreconditionChallenge;
-  operatorDid: string;
-  privateKey: Uint8Array;
-  tokenTtl: number;
-  resourceUri: string;
-  preconditionConfigs: PreconditionConfig[];
-}
-
-/**
- * Module-level map for cross-session challenge lookup.
- * Claude Desktop creates separate AppBridge and Model sessions (ext-apps#481),
- * each mapping to a different Durable Object. The Model DO creates the challenge;
- * the AppBridge DO calls x428-attest. This map lets the AppBridge find the
- * challenge data without accessing the Model DO's storage.
- *
- * Only stores serializable data — no DO-specific I/O objects.
- */
-const crossSessionChallenges = new Map<string, CrossSessionChallengeData>();
+const defaultAcceptedStore: AcceptedPreconditionStore = {
+  getAccepted: (sessionId) => sharedAccepted.get(sessionId) ?? new Set(),
+  addAll: (sessionId, keys) => {
+    let set = sharedAccepted.get(sessionId);
+    if (!set) { set = new Set(); sharedAccepted.set(sessionId, set); }
+    for (const k of keys) set.add(k);
+  },
+};
 
 /**
  * Compute a stable identity key for a precondition config.
@@ -217,17 +210,23 @@ function preconditionKey(p: PreconditionConfig): string {
   }
 }
 
+// ---------------------------------------------------------------------------
 // Per-server state (registration flags + capability detection)
+// ---------------------------------------------------------------------------
+
 interface ServerState {
   attestToolRegistered: boolean;
   resourceRegistered: boolean;
   /** Raw extensions from client capabilities, captured before Zod strips them. */
   rawExtensions?: Record<string, unknown>;
   extensionsCaptured: boolean;
-  /** Per-challenge crypto context, scoped to this server instance (not module-level). */
-  challengeContexts: Map<string, ChallengeContext>;
-  /** Accepted precondition keys per session, for cross-tool consent sharing. */
-  acceptedPreconditions: Map<string, Set<string>>;
+  /** onAttestation callbacks keyed by challengeId (same-session only, not serializable). */
+  attestationCallbacks: Map<string, X428Config["onAttestation"]>;
+  /** Shared stores — set on first x428Guard call, used by all tools on this server. */
+  challengeStore: ChallengeStore;
+  tokenStore: TokenStore;
+  acceptedPreconditionStore: AcceptedPreconditionStore;
+  storesInitialized: boolean;
 }
 
 const serverStateMap = new WeakMap<McpServerWithInit, ServerState>();
@@ -239,8 +238,11 @@ function getServerState(server: McpServerWithInit): ServerState {
       attestToolRegistered: false,
       resourceRegistered: false,
       extensionsCaptured: false,
-      challengeContexts: new Map(),
-      acceptedPreconditions: new Map(),
+      attestationCallbacks: new Map(),
+      challengeStore: defaultChallengeStore,
+      tokenStore: defaultTokenStore,
+      acceptedPreconditionStore: defaultAcceptedStore,
+      storesInitialized: false,
     };
     serverStateMap.set(server, state);
   }
@@ -327,19 +329,16 @@ function ensureResourceRegistered(server: McpServerWithInit): void {
 /**
  * Register the x428-attest tool (once per server).
  * This tool is called by the MCP App UI to confirm precondition acceptance.
- * Uses server-scoped challengeContexts to find the correct crypto context for each challenge.
+ * Uses the server's shared stores (ChallengeStore, TokenStore, AcceptedPreconditionStore)
+ * for cross-session lookup — with KV-backed stores, attestation on one session
+ * (AppBridge) is visible from another (Model).
  */
-function ensureAttestToolRegistered(
-  server: McpServerWithInit,
-): void {
+function ensureAttestToolRegistered(server: McpServerWithInit): void {
   const state = getServerState(server);
   if (state.attestToolRegistered) return;
   state.attestToolRegistered = true;
 
-  // Capture state ref so the handler uses the correct per-server context map
-  const { challengeContexts } = state;
-
-  const attestHandler = async (args: { challengeId: string; accepted: boolean; challengeData?: string }, extra: McpToolExtra) => {
+  const attestHandler = async (args: { challengeId: string; accepted: boolean }, extra: McpToolExtra) => {
     if (!args.accepted) {
       return {
         content: [{ type: "text", text: "x428: User declined preconditions." }],
@@ -347,53 +346,20 @@ function ensureAttestToolRegistered(
       };
     }
 
-    // Look up challenge context: try per-server state first (same session),
-    // then fall back to module-level cross-session map (Claude Desktop),
-    // then fall back to challengeData sent by the App UI (cross-isolate).
-    const ctx = challengeContexts.get(args.challengeId);
-    const crossCtx = !ctx ? crossSessionChallenges.get(args.challengeId) : null;
-
-    // Parse challengeData from App UI if no local context found
-    let inlineChallenge: PreconditionChallenge | null = null;
-    let inlinePreconditionConfigs: PreconditionConfig[] | null = null;
-    if (!ctx && !crossCtx && args.challengeData) {
-      try {
-        const parsed = JSON.parse(args.challengeData);
-        inlineChallenge = parsed.challenge;
-        inlinePreconditionConfigs = parsed.preconditionConfigs;
-      } catch {
-        // Invalid JSON — fall through to error
-      }
-    }
-
-    if (!ctx && !crossCtx && !inlineChallenge) {
+    // Single lookup path: ChallengeStore has the full record (challenge + crypto context).
+    // With KV-backed stores, this works across sessions (AppBridge → Model).
+    const record = await state.challengeStore.get(args.challengeId);
+    if (!record) {
       return {
         content: [{ type: "text", text: "x428: No pending challenge found." }],
         isError: true,
       };
     }
 
-    // Use per-server context if available, then cross-session, then inline
-    const challenge = ctx
-      ? ctx.challengeStore.get(args.challengeId)
-      : crossCtx?.challenge ?? inlineChallenge;
-    const preconditionConfigs = ctx?.preconditionConfigs ?? crossCtx?.preconditionConfigs ?? inlinePreconditionConfigs ?? [];
-    const tokenTtl = ctx?.tokenTtl ?? crossCtx?.tokenTtl ?? 3600;
-    const resourceUri = ctx?.resourceUri ?? crossCtx?.resourceUri ?? "x428://mcp/tool";
-    // Use original keypair if available, otherwise create fresh (self-attestation)
-    const ephemeral = !ctx && !crossCtx ? createEphemeralDid() : null;
-    const operatorDid = ctx?.operatorDid ?? crossCtx?.operatorDid ?? ephemeral!.did;
-    const privateKey = ctx?.privateKey ?? crossCtx?.privateKey ?? ephemeral!.privateKey;
-    // For cross-session/inline, use fresh resolver/nonceStore (stateless for self-attestation)
-    const resolver = ctx?.resolver ?? new DidKeyResolver();
-    const nonceStore = ctx?.nonceStore ?? new InMemoryNonceStore();
-
-    if (!challenge) {
-      return {
-        content: [{ type: "text", text: "x428: No pending challenge found." }],
-        isError: true,
-      };
-    }
+    const { challenge, operatorDid, privateKey, tokenTtl, resourceUri, preconditionConfigs } = record;
+    // Fresh resolver/nonceStore — fine for self-attestation
+    const resolver = new DidKeyResolver();
+    const nonceStore = new InMemoryNonceStore();
 
     try {
       const result = await processAttestation(
@@ -407,36 +373,28 @@ function ensureAttestToolRegistered(
         };
       }
 
-      // Fire audit callback (only available in same-session context)
       const sessionId = extra.sessionId ?? "_default";
-      if (ctx?.onAttestation) {
-        ctx.onAttestation({
+
+      // Fire audit callback (same-session only — callbacks aren't serializable)
+      const onAttestation = state.attestationCallbacks.get(args.challengeId);
+      if (onAttestation) {
+        onAttestation({
           challengeId: args.challengeId,
           sessionId,
           operatorDid,
           attestations: buildAttestationsFromChallenge(challenge),
         });
+        state.attestationCallbacks.delete(args.challengeId);
       }
 
-      // Cache token (only if we have the original stores — same session)
-      if (ctx) {
-        const cacheKey = `${sessionId}:${resourceUri}`;
-        ctx.tokenStore.set(cacheKey, result);
-        ctx.challengeStore.delete(args.challengeId);
-      }
-      challengeContexts.delete(args.challengeId);
-      crossSessionChallenges.delete(args.challengeId);
+      // Cache token and clean up challenge
+      const cacheKey = `${sessionId}:${resourceUri}`;
+      await state.tokenStore.set(cacheKey, result);
+      await state.challengeStore.delete(args.challengeId);
 
-      // Record accepted preconditions so other tools with the same
-      // preconditions don't re-prompt (consent is per-precondition, not per-tool).
-      let accepted = state.acceptedPreconditions.get(sessionId);
-      if (!accepted) {
-        accepted = new Set();
-        state.acceptedPreconditions.set(sessionId, accepted);
-      }
-      for (const pc of preconditionConfigs) {
-        accepted.add(preconditionKey(pc));
-      }
+      // Record accepted preconditions (cross-session via KV)
+      const keys = preconditionConfigs.map(preconditionKey);
+      await state.acceptedPreconditionStore.addAll(sessionId, keys);
 
       return {
         content: [{ type: "text", text: "x428: Attestation accepted. You may now use the tool." }],
@@ -455,7 +413,7 @@ function ensureAttestToolRegistered(
       "x428-attest",
       {
         description: "x428 attestation endpoint",
-        inputSchema: { challengeId: z.string(), accepted: z.boolean(), challengeData: z.string().optional() },
+        inputSchema: { challengeId: z.string(), accepted: z.boolean() },
         _meta: { ui: { resourceUri: UI_RESOURCE_URI, visibility: ["app"] }, "ui/resourceUri": UI_RESOURCE_URI },
       },
       attestHandler,
@@ -483,6 +441,10 @@ function ensureAttestToolRegistered(
  *
  * For clients that support elicitation but not Apps (e.g. Inspector Tools tab),
  * use `x428GuardElicitation` instead.
+ *
+ * All tools on a server share the same stores (ChallengeStore, TokenStore,
+ * AcceptedPreconditionStore). Stores are set from the first x428Guard call's
+ * config; subsequent calls use the same stores.
  */
 export function x428Guard(
   mcpServer: McpServerWithInit,
@@ -492,13 +454,17 @@ export function x428Guard(
   handler: (args: any, extra: McpToolExtra) => Promise<any>,
 ): void {
   const tokenTtl = config.tokenTtl ?? 3600;
-  const resolver = config.didResolver ?? new DidKeyResolver();
-  const nonceStore = config.nonceStore ?? new InMemoryNonceStore();
   const resourceUri = config.resourceUri ?? `x428://mcp/tool/${toolName}`;
   const { did: operatorDid, privateKey } = createEphemeralDid();
   const state = getServerState(mcpServer);
-  const cStore = config.challengeStore ?? defaultChallengeStore;
-  const tStore = config.tokenStore ?? defaultTokenStore;
+
+  // Initialize shared stores from first config (subsequent calls reuse)
+  if (!state.storesInitialized) {
+    state.storesInitialized = true;
+    if (config.challengeStore) state.challengeStore = config.challengeStore;
+    if (config.tokenStore) state.tokenStore = config.tokenStore;
+    if (config.acceptedPreconditionStore) state.acceptedPreconditionStore = config.acceptedPreconditionStore;
+  }
 
   // Capture raw extensions before Zod strips them (for future use)
   ensureExtensionsCapture(mcpServer, state);
@@ -508,19 +474,19 @@ export function x428Guard(
   ensureAttestToolRegistered(mcpServer);
 
   const toolCallback = async (args: any, extra: McpToolExtra) => {
-    // Check token cache by sessionId — works for re-calls from the App
-    // iframe since x428-attest and the re-call use the same session.
     const sessionId = extra.sessionId ?? "_default";
     const cacheKey = `${sessionId}:${resourceUri}`;
-    const cached = tStore.get(cacheKey);
+
+    // Check token cache — works for re-calls from the App iframe
+    const cached = await state.tokenStore.get(cacheKey);
     if (cached && new Date(cached.expiresAt) > new Date()) {
       return handler(args, extra);
     }
 
     // Filter to only unattested preconditions (consent is per-precondition,
     // not per-tool — accepting TOS for search also satisfies TOS for info).
-    const accepted = state.acceptedPreconditions.get(sessionId);
-    const remainingPreconditions = accepted
+    const accepted = await state.acceptedPreconditionStore.getAccepted(sessionId);
+    const remainingPreconditions = accepted.size > 0
       ? config.preconditions.filter((pc) => !accepted.has(preconditionKey(pc)))
       : config.preconditions;
 
@@ -533,33 +499,21 @@ export function x428Guard(
     const challenge = generateChallenge(remainingPreconditions, resourceUri, { ttlSeconds: 300 });
     const preconditions = challenge.preconditions as PreconditionObject[];
 
-    // Store challenge keyed by challengeId (UUID).
-    // x428-attest finds it by challengeId regardless of session.
-    cStore.set(challengeId, challenge);
-
-    // Store per-challenge crypto context so the shared attest handler
-    // can verify this specific tool's challenge with the right keypair.
-    state.challengeContexts.set(challengeId, {
-      operatorDid, privateKey, resolver, nonceStore, tokenTtl,
-      resourceUri, challengeStore: cStore, tokenStore: tStore,
-      onAttestation: config.onAttestation,
+    // Store full challenge record (challenge + crypto context) in shared store.
+    // With KV-backed store, the x428-attest handler on any session can find it.
+    await state.challengeStore.set(challengeId, {
+      challenge,
+      operatorDid,
+      privateKey,
+      tokenTtl,
+      resourceUri,
       preconditionConfigs: config.preconditions,
     });
 
-    // Also store in module-level map for cross-session lookup (Claude Desktop).
-    // Only serializable data — no DO-specific store references.
-    crossSessionChallenges.set(challengeId, {
-      challenge, operatorDid, privateKey, tokenTtl,
-      resourceUri, preconditionConfigs: config.preconditions,
-    });
-
-    // Bundle challenge + preconditionConfigs for cross-session round-trip.
-    // The App UI sends this back with x428-attest so the attest handler
-    // can verify without needing shared storage across DO isolates.
-    const challengeData = JSON.stringify({
-      challenge,
-      preconditionConfigs: remainingPreconditions,
-    });
+    // Store onAttestation callback in server state (same-session only, not serializable)
+    if (config.onAttestation) {
+      state.attestationCallbacks.set(challengeId, config.onAttestation);
+    }
 
     return {
       content: [{ type: "text", text: `x428: Precondition acceptance required for ${toolName}.` }],
@@ -568,7 +522,6 @@ export function x428Guard(
         toolName,
         toolArgs: args,
         challengeId,
-        challengeData,
         preconditions: preconditions.map((p) => ({
           type: p.type,
           ...(p.type === "tos" ? { documentUrl: p.documentUrl, tosVersion: p.tosVersion } : {}),

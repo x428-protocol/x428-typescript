@@ -12,6 +12,10 @@ bindings = [
 tag = "v1"
 new_sqlite_classes = ["X428McpAgent"]
 
+[[kv_namespaces]]
+binding = "X428_KV"
+id = "007caefb1fa34bbba3405b69066eee77"
+
 [[routes]]
 pattern = "demo.x428.org"
 custom_domain = true
