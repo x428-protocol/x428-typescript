@@ -1,0 +1,16 @@
+name = "x428-demo-workers"
+main = "src/index.ts"
+compatibility_date = "2026-01-28"
+compatibility_flags = ["nodejs_compat"]
+
+[durable_objects]
+bindings = [
+  { name = "X428_MCP", class_name = "X428McpAgent" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["X428McpAgent"]
+
+# Custom domain — set CUSTOM_DOMAIN env var or override in [env.production]
+# routes = [{ pattern = "your-domain.example.com/*", custom_domain = true }]

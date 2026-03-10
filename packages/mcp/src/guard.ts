@@ -42,6 +42,19 @@ export interface McpToolExtra {
   [key: string]: unknown;
 }
 
+/** Persistent challenge store (replaces module-level Map). */
+export interface ChallengeStore {
+  get(challengeId: string): PreconditionChallenge | null;
+  set(challengeId: string, challenge: PreconditionChallenge, ttlMs?: number): void;
+  delete(challengeId: string): void;
+}
+
+/** Persistent token store (replaces module-level Map). */
+export interface TokenStore {
+  get(cacheKey: string): AttestationToken | null;
+  set(cacheKey: string, token: AttestationToken): void;
+}
+
 export interface X428Config {
   preconditions: PreconditionConfig[];
   /** Required for elicitation fallback. Typically `mcpServer.server`. */
@@ -50,6 +63,15 @@ export interface X428Config {
   tokenTtl?: number;
   didResolver?: DidResolver;
   nonceStore?: NonceStore;
+  challengeStore?: ChallengeStore;
+  tokenStore?: TokenStore;
+  /** Called after successful attestation verification. */
+  onAttestation?: (entry: {
+    challengeId: string;
+    sessionId: string;
+    operatorDid: string;
+    attestations: unknown[];
+  }) => void;
 }
 
 /**
@@ -127,6 +149,17 @@ const sharedChallenges = new Map<string, PreconditionChallenge>();
 
 /** Attestation tokens, keyed by "sessionId:resourceUri" for standard lookup. */
 const sharedTokens = new Map<string, AttestationToken>();
+
+const defaultChallengeStore: ChallengeStore = {
+  get: (id) => sharedChallenges.get(id) ?? null,
+  set: (id, challenge) => { sharedChallenges.set(id, challenge); },
+  delete: (id) => { sharedChallenges.delete(id); },
+};
+
+const defaultTokenStore: TokenStore = {
+  get: (key) => sharedTokens.get(key) ?? null,
+  set: (key, token) => { sharedTokens.set(key, token); },
+};
 
 // Per-server state (registration flags + capability detection)
 interface ServerState {
@@ -241,6 +274,9 @@ function ensureAttestToolRegistered(
   nonceStore: NonceStore,
   tokenTtl: number,
   resourceUri: string,
+  challengeStoreOverride: ChallengeStore,
+  tokenStoreOverride: TokenStore,
+  onAttestation?: X428Config["onAttestation"],
 ): void {
   const state = getServerState(server);
   if (state.attestToolRegistered) return;
@@ -254,7 +290,7 @@ function ensureAttestToolRegistered(
       };
     }
 
-    const challenge = sharedChallenges.get(args.challengeId);
+    const challenge = challengeStoreOverride.get(args.challengeId);
     if (!challenge) {
       return {
         content: [{ type: "text", text: "x428: No pending challenge found." }],
@@ -274,13 +310,23 @@ function ensureAttestToolRegistered(
         };
       }
 
+      // Fire audit callback before caching
+      const sessionId = extra.sessionId ?? "_default";
+      if (onAttestation) {
+        onAttestation({
+          challengeId: args.challengeId,
+          sessionId,
+          operatorDid,
+          attestations: buildAttestationsFromChallenge(challenge),
+        });
+      }
+
       // Cache token by the calling session's ID. The App iframe's
       // re-call of the original tool uses the same session (AppBridge),
       // so the token will be found by sessionId on the next call.
-      const sessionId = extra.sessionId ?? "_default";
       const cacheKey = `${sessionId}:${resourceUri}`;
-      sharedTokens.set(cacheKey, result);
-      sharedChallenges.delete(args.challengeId);
+      tokenStoreOverride.set(cacheKey, result);
+      challengeStoreOverride.delete(args.challengeId);
 
       return {
         content: [{ type: "text", text: "x428: Attestation accepted. You may now use the tool." }],
@@ -341,6 +387,8 @@ export function x428Guard(
   const resourceUri = config.resourceUri ?? `x428://mcp/tool/${toolName}`;
   const { did: operatorDid, privateKey } = createEphemeralDid();
   const state = getServerState(mcpServer);
+  const cStore = config.challengeStore ?? defaultChallengeStore;
+  const tStore = config.tokenStore ?? defaultTokenStore;
 
   // Capture raw extensions before Zod strips them (for future use)
   ensureExtensionsCapture(mcpServer, state);
@@ -349,6 +397,7 @@ export function x428Guard(
   ensureResourceRegistered(mcpServer);
   ensureAttestToolRegistered(
     mcpServer, operatorDid, privateKey, resolver, nonceStore, tokenTtl, resourceUri,
+    cStore, tStore, config.onAttestation,
   );
 
   const toolCallback = async (args: any, extra: McpToolExtra) => {
@@ -356,7 +405,7 @@ export function x428Guard(
     // iframe since x428-attest and the re-call use the same session.
     const sessionId = extra.sessionId ?? "_default";
     const cacheKey = `${sessionId}:${resourceUri}`;
-    const cached = sharedTokens.get(cacheKey);
+    const cached = tStore.get(cacheKey);
     if (cached && new Date(cached.expiresAt) > new Date()) {
       return handler(args, extra);
     }
@@ -365,9 +414,9 @@ export function x428Guard(
     const challenge = generateChallenge(config.preconditions, resourceUri, { ttlSeconds: 300 });
     const preconditions = challenge.preconditions as PreconditionObject[];
 
-    // Store challenge in shared map keyed by challengeId (UUID).
+    // Store challenge keyed by challengeId (UUID).
     // x428-attest finds it by challengeId regardless of session.
-    sharedChallenges.set(challengeId, challenge);
+    cStore.set(challengeId, challenge);
 
     return {
       content: [{ type: "text", text: `x428: Precondition acceptance required for ${toolName}.` }],

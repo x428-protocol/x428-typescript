@@ -99,7 +99,7 @@ Choose based on your target client. See the demo servers for complete examples.
 
 ## Demo Servers
 
-Two demo servers are provided, sharing the same tool definitions (`examples/demo-tools.ts`):
+Three demo servers are provided, sharing the same tool definitions:
 
 ### Elicitation mode (stdio)
 
@@ -129,7 +129,26 @@ cloudflared tunnel --url http://localhost:3428
 # Add https://<tunnel-url>/mcp as a Streamable HTTP server in Claude Desktop
 ```
 
-Both demos include three tools: `search` (TOS), `lookup` (age verification), `info` (TOS + age).
+### Cloudflare Workers mode (production-grade)
+
+Uses `McpAgent` from the Cloudflare Agents SDK with Durable Object SQLite storage.
+Persistent challenge/token state, replay protection, and attestation audit logging.
+
+```bash
+# Local development
+cd examples/demo-server-workers
+cp .dev.vars.example .dev.vars  # fill in values
+npm install
+npm run dev
+
+# Connect MCP Inspector
+npx @modelcontextprotocol/inspector --transport http --server-url http://localhost:8787/mcp
+
+# Deploy
+CLOUDFLARE_ACCOUNT_ID=your-account-id npm run deploy
+```
+
+All demos include three tools: `search` (TOS), `lookup` (age verification), `info` (TOS + age).
 
 ## Core Protocol API
 

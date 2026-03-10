@@ -1,4 +1,4 @@
-.PHONY: setup test build typecheck update-vectors check-vectors clean demo demo-apps
+.PHONY: setup test build typecheck update-vectors check-vectors clean demo demo-apps demo-workers deploy-workers
 
 ## First-time setup: install deps and init submodule
 setup:
@@ -46,6 +46,14 @@ demo:
 ## Run MCP Apps demo (HTTP on :3428, use with Inspector or Claude Desktop)
 demo-apps:
 	npx tsx examples/demo-server-apps.ts
+
+## Run Workers demo locally (requires wrangler)
+demo-workers:
+	npm run dev --prefix examples/demo-server-workers
+
+## Deploy Workers demo (requires CLOUDFLARE_ACCOUNT_ID)
+deploy-workers:
+	npm run deploy --prefix examples/demo-server-workers
 
 ## Clean build artifacts
 clean:
