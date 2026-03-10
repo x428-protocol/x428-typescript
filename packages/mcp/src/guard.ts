@@ -159,21 +159,44 @@ function getServerState(server: McpServerWithInit): ServerState {
  * The MCP SDK's ClientCapabilitiesSchema uses z.object() without
  * .passthrough(), so `extensions` is silently dropped during Zod parsing
  * in setRequestHandler(). The raw request at _onrequest() still has it.
+ *
+ * Uses Object.defineProperty to intercept both immediate and deferred
+ * assignment of _onrequest (e.g., when server.connect() runs after init()).
  */
 function ensureExtensionsCapture(mcpServer: McpServerWithInit, state: ServerState): void {
   if (state.extensionsCaptured) return;
   state.extensionsCaptured = true;
 
   const rawServer = mcpServer.server as any;
-  const origOnRequest = rawServer._onrequest?.bind(rawServer);
-  if (!origOnRequest) return;
 
-  rawServer._onrequest = (request: any, extra: any) => {
-    if (request?.method === "initialize" && request?.params?.capabilities?.extensions) {
-      state.rawExtensions = request.params.capabilities.extensions;
-    }
-    return origOnRequest(request, extra);
-  };
+  function wrapOnRequest(fn: Function): Function {
+    return function (this: any, request: any, extra: any) {
+      if (request?.method === "initialize" && request?.params?.capabilities?.extensions) {
+        state.rawExtensions = request.params.capabilities.extensions;
+      }
+      return fn.call(this, request, extra);
+    };
+  }
+
+  // If _onrequest is already set (normal McpServer usage), wrap it now
+  let currentOnRequest = rawServer._onrequest;
+  if (currentOnRequest) {
+    rawServer._onrequest = wrapOnRequest(currentOnRequest);
+    return;
+  }
+
+  // If _onrequest is NOT set yet (McpAgent: init() before connect()),
+  // intercept the future assignment via defineProperty
+  Object.defineProperty(rawServer, "_onrequest", {
+    get() {
+      return currentOnRequest;
+    },
+    set(fn: Function) {
+      currentOnRequest = wrapOnRequest(fn);
+    },
+    configurable: true,
+    enumerable: true,
+  });
 }
 
 /**

@@ -419,3 +419,52 @@ describe("x428Guard — capability-independent behavior", () => {
     expect(result.content[0].text).toBe("result");
   });
 });
+
+// ---------------------------------------------------------------------------
+// ensureExtensionsCapture timing (McpAgent lifecycle)
+// ---------------------------------------------------------------------------
+
+describe("ensureExtensionsCapture timing", () => {
+  it("captures extensions even when _onrequest is set after patching", async () => {
+    // Simulate McpAgent lifecycle: init() before connect()
+    const mockLowLevelServer = {
+      // _onrequest is NOT set yet (connect() hasn't been called)
+      getClientCapabilities: () => null,
+    } as any;
+    const mcpServer = {
+      server: mockLowLevelServer,
+      tool: vi.fn(),
+    } as any;
+
+    // Call x428Guard — this triggers ensureExtensionsCapture
+    // At this point _onrequest is undefined
+    x428Guard(mcpServer, {
+      preconditions: [
+        { type: "tos", documentUrl: "https://example.com/tos", tosVersion: "1.0", documentHash: "sha256-abc" },
+      ],
+    }, "search", { description: "Search" }, async () => ({ content: [{ type: "text", text: "ok" }] }));
+
+    // NOW simulate connect() setting _onrequest (after our patch)
+    const fakeOnRequest = vi.fn().mockResolvedValue(undefined);
+    mockLowLevelServer._onrequest = fakeOnRequest;
+
+    // Call _onrequest with an initialize message containing extensions.
+    // With the fix, the defineProperty setter wraps fakeOnRequest, so
+    // reading _onrequest back gives us the wrapper (not fakeOnRequest itself).
+    // The wrapper should intercept the extensions AND delegate to fakeOnRequest.
+    const initRequest = {
+      method: "initialize",
+      params: { capabilities: { extensions: { "x428": { version: "0.1" } } } },
+    };
+    await mockLowLevelServer._onrequest(initRequest, {});
+
+    // The original handler should still be called (delegation works)
+    expect(fakeOnRequest).toHaveBeenCalled();
+
+    // The wrapper should have intercepted the extensions and stored them.
+    // Without the fix, _onrequest IS fakeOnRequest (no wrapper), so
+    // the extensions are never captured. We verify by checking that
+    // _onrequest is NOT the same reference as fakeOnRequest (it's wrapped).
+    expect(mockLowLevelServer._onrequest).not.toBe(fakeOnRequest);
+  });
+});
