@@ -161,6 +161,37 @@ const defaultTokenStore: TokenStore = {
   set: (key, token) => { sharedTokens.set(key, token); },
 };
 
+/** Per-challenge crypto context so the shared attest handler can verify any tool's challenge. */
+interface ChallengeContext {
+  operatorDid: string;
+  privateKey: Uint8Array;
+  resolver: DidResolver;
+  nonceStore: NonceStore;
+  tokenTtl: number;
+  resourceUri: string;
+  challengeStore: ChallengeStore;
+  tokenStore: TokenStore;
+  onAttestation?: X428Config["onAttestation"];
+  /** Original precondition configs, used to mark them as accepted. */
+  preconditionConfigs: PreconditionConfig[];
+}
+
+/**
+ * Compute a stable identity key for a precondition config.
+ * Two preconditions with the same key represent the same consent
+ * (e.g., same TOS document+version, same age threshold).
+ */
+function preconditionKey(p: PreconditionConfig): string {
+  switch (p.type) {
+    case "tos":
+      return `tos:${p.documentUrl}:${p.tosVersion}`;
+    case "age":
+      return `age:${p.minimumAge}`;
+    case "identity":
+      return "identity";
+  }
+}
+
 // Per-server state (registration flags + capability detection)
 interface ServerState {
   attestToolRegistered: boolean;
@@ -168,6 +199,10 @@ interface ServerState {
   /** Raw extensions from client capabilities, captured before Zod strips them. */
   rawExtensions?: Record<string, unknown>;
   extensionsCaptured: boolean;
+  /** Per-challenge crypto context, scoped to this server instance (not module-level). */
+  challengeContexts: Map<string, ChallengeContext>;
+  /** Accepted precondition keys per session, for cross-tool consent sharing. */
+  acceptedPreconditions: Map<string, Set<string>>;
 }
 
 const serverStateMap = new WeakMap<McpServerWithInit, ServerState>();
@@ -179,6 +214,8 @@ function getServerState(server: McpServerWithInit): ServerState {
       attestToolRegistered: false,
       resourceRegistered: false,
       extensionsCaptured: false,
+      challengeContexts: new Map(),
+      acceptedPreconditions: new Map(),
     };
     serverStateMap.set(server, state);
   }
@@ -265,22 +302,17 @@ function ensureResourceRegistered(server: McpServerWithInit): void {
 /**
  * Register the x428-attest tool (once per server).
  * This tool is called by the MCP App UI to confirm precondition acceptance.
+ * Uses server-scoped challengeContexts to find the correct crypto context for each challenge.
  */
 function ensureAttestToolRegistered(
   server: McpServerWithInit,
-  operatorDid: string,
-  privateKey: Uint8Array,
-  resolver: DidResolver,
-  nonceStore: NonceStore,
-  tokenTtl: number,
-  resourceUri: string,
-  challengeStoreOverride: ChallengeStore,
-  tokenStoreOverride: TokenStore,
-  onAttestation?: X428Config["onAttestation"],
 ): void {
   const state = getServerState(server);
   if (state.attestToolRegistered) return;
   state.attestToolRegistered = true;
+
+  // Capture state ref so the handler uses the correct per-server context map
+  const { challengeContexts } = state;
 
   const attestHandler = async (args: { challengeId: string; accepted: boolean }, extra: McpToolExtra) => {
     if (!args.accepted) {
@@ -290,7 +322,15 @@ function ensureAttestToolRegistered(
       };
     }
 
-    const challenge = challengeStoreOverride.get(args.challengeId);
+    const ctx = challengeContexts.get(args.challengeId);
+    if (!ctx) {
+      return {
+        content: [{ type: "text", text: "x428: No pending challenge found." }],
+        isError: true,
+      };
+    }
+
+    const challenge = ctx.challengeStore.get(args.challengeId);
     if (!challenge) {
       return {
         content: [{ type: "text", text: "x428: No pending challenge found." }],
@@ -300,7 +340,7 @@ function ensureAttestToolRegistered(
 
     try {
       const result = await processAttestation(
-        challenge, operatorDid, privateKey, resolver, nonceStore, tokenTtl,
+        challenge, ctx.operatorDid, ctx.privateKey, ctx.resolver, ctx.nonceStore, ctx.tokenTtl,
       );
 
       if (result instanceof X428Error) {
@@ -312,11 +352,11 @@ function ensureAttestToolRegistered(
 
       // Fire audit callback before caching
       const sessionId = extra.sessionId ?? "_default";
-      if (onAttestation) {
-        onAttestation({
+      if (ctx.onAttestation) {
+        ctx.onAttestation({
           challengeId: args.challengeId,
           sessionId,
-          operatorDid,
+          operatorDid: ctx.operatorDid,
           attestations: buildAttestationsFromChallenge(challenge),
         });
       }
@@ -324,9 +364,21 @@ function ensureAttestToolRegistered(
       // Cache token by the calling session's ID. The App iframe's
       // re-call of the original tool uses the same session (AppBridge),
       // so the token will be found by sessionId on the next call.
-      const cacheKey = `${sessionId}:${resourceUri}`;
-      tokenStoreOverride.set(cacheKey, result);
-      challengeStoreOverride.delete(args.challengeId);
+      const cacheKey = `${sessionId}:${ctx.resourceUri}`;
+      ctx.tokenStore.set(cacheKey, result);
+      ctx.challengeStore.delete(args.challengeId);
+      challengeContexts.delete(args.challengeId);
+
+      // Record accepted preconditions so other tools with the same
+      // preconditions don't re-prompt (consent is per-precondition, not per-tool).
+      let accepted = state.acceptedPreconditions.get(sessionId);
+      if (!accepted) {
+        accepted = new Set();
+        state.acceptedPreconditions.set(sessionId, accepted);
+      }
+      for (const pc of ctx.preconditionConfigs) {
+        accepted.add(preconditionKey(pc));
+      }
 
       return {
         content: [{ type: "text", text: "x428: Attestation accepted. You may now use the tool." }],
@@ -395,10 +447,7 @@ export function x428Guard(
 
   // Eagerly register shared infrastructure
   ensureResourceRegistered(mcpServer);
-  ensureAttestToolRegistered(
-    mcpServer, operatorDid, privateKey, resolver, nonceStore, tokenTtl, resourceUri,
-    cStore, tStore, config.onAttestation,
-  );
+  ensureAttestToolRegistered(mcpServer);
 
   const toolCallback = async (args: any, extra: McpToolExtra) => {
     // Check token cache by sessionId — works for re-calls from the App
@@ -410,13 +459,34 @@ export function x428Guard(
       return handler(args, extra);
     }
 
+    // Filter to only unattested preconditions (consent is per-precondition,
+    // not per-tool — accepting TOS for search also satisfies TOS for info).
+    const accepted = state.acceptedPreconditions.get(sessionId);
+    const remainingPreconditions = accepted
+      ? config.preconditions.filter((pc) => !accepted.has(preconditionKey(pc)))
+      : config.preconditions;
+
+    // All preconditions already accepted → run handler directly
+    if (remainingPreconditions.length === 0) {
+      return handler(args, extra);
+    }
+
     const challengeId = crypto.randomUUID();
-    const challenge = generateChallenge(config.preconditions, resourceUri, { ttlSeconds: 300 });
+    const challenge = generateChallenge(remainingPreconditions, resourceUri, { ttlSeconds: 300 });
     const preconditions = challenge.preconditions as PreconditionObject[];
 
     // Store challenge keyed by challengeId (UUID).
     // x428-attest finds it by challengeId regardless of session.
     cStore.set(challengeId, challenge);
+
+    // Store per-challenge crypto context so the shared attest handler
+    // can verify this specific tool's challenge with the right keypair.
+    state.challengeContexts.set(challengeId, {
+      operatorDid, privateKey, resolver, nonceStore, tokenTtl,
+      resourceUri, challengeStore: cStore, tokenStore: tStore,
+      onAttestation: config.onAttestation,
+      preconditionConfigs: config.preconditions,
+    });
 
     return {
       content: [{ type: "text", text: `x428: Precondition acceptance required for ${toolName}.` }],
