@@ -552,8 +552,9 @@ export function x428Guard(
       };
     }
 
-    const resolver = new DidKeyResolver();
-    const nonceStore = new InMemoryNonceStore();
+    const resolver = config.didResolver ?? new DidKeyResolver();
+    const nonceStore = config.nonceStore ?? new InMemoryNonceStore();
+    const challengeId = crypto.randomUUID();
     const challenge = generateChallenge(remainingPreconditions, resourceUri, { ttlSeconds: 300 });
     const preconditions = challenge.preconditions as PreconditionObject[];
     const elicitReq = buildCombinedElicitation(preconditions);
@@ -607,7 +608,6 @@ export function x428Guard(
 
       // Fire onAttestation callback
       if (config.onAttestation) {
-        const challengeId = crypto.randomUUID();
         config.onAttestation({
           challengeId,
           sessionId,
