@@ -338,66 +338,72 @@ function ensureAttestToolRegistered(server: McpServerWithInit): void {
   if (state.attestToolRegistered) return;
   state.attestToolRegistered = true;
 
-  const attestHandler = async (args: { challengeId: string; accepted: boolean }, extra: McpToolExtra) => {
-    if (!args.accepted) {
+  const resolver = new DidKeyResolver();
+  const nonceStore = new InMemoryNonceStore();
+
+  const attestHandler = async (args: { challengeId: string; accepted: boolean }, extra: any) => {
+    const { challengeId, accepted } = args;
+    const sessionId = extra?.sessionId ?? "_default";
+
+    if (!accepted) {
       return {
         content: [{ type: "text", text: "x428: User declined preconditions." }],
         isError: true,
       };
     }
 
-    // Single lookup path: ChallengeStore has the full record (challenge + crypto context).
-    // With KV-backed stores, this works across sessions (AppBridge → Model).
-    const record = await state.challengeStore.get(args.challengeId);
+    // Look up challenge record from shared store
+    const record = await state.challengeStore.get(challengeId);
     if (!record) {
       return {
-        content: [{ type: "text", text: "x428: No pending challenge found." }],
+        content: [{ type: "text", text: "x428: Challenge not found or expired." }],
         isError: true,
       };
     }
 
     const { challenge, operatorDid, privateKey, tokenTtl, resourceUri, preconditionConfigs } = record;
-    // Fresh resolver/nonceStore — fine for self-attestation
-    const resolver = new DidKeyResolver();
-    const nonceStore = new InMemoryNonceStore();
+
+    if (!challenge?.preconditions) {
+      return {
+        content: [{ type: "text", text: "x428: Invalid challenge record (missing preconditions)." }],
+        isError: true,
+      };
+    }
 
     try {
-      const result = await processAttestation(
-        challenge, operatorDid, privateKey, resolver, nonceStore, tokenTtl,
-      );
-
+      const result = await processAttestation(challenge, operatorDid, privateKey, resolver, nonceStore, tokenTtl);
       if (result instanceof X428Error) {
         return {
-          content: [{ type: "text", text: `x428: Attestation failed: ${result.detail}` }],
+          content: [{ type: "text", text: `x428: Attestation verification failed: ${result.detail}` }],
           isError: true,
         };
       }
 
-      const sessionId = extra.sessionId ?? "_default";
+      // Cache token by sessionId + resourceUri
+      const cacheKey = `${sessionId}:${resourceUri}`;
+      await state.tokenStore.set(cacheKey, result);
 
-      // Fire audit callback (same-session only — callbacks aren't serializable)
-      const onAttestation = state.attestationCallbacks.get(args.challengeId);
-      if (onAttestation) {
-        onAttestation({
-          challengeId: args.challengeId,
+      // Record accepted preconditions in shared store
+      const acceptedKeys = preconditionConfigs.map((pc) => preconditionKey(pc));
+      await state.acceptedPreconditionStore.addAll(sessionId, acceptedKeys);
+
+      // Fire onAttestation callback if registered for this challenge
+      const callback = state.attestationCallbacks.get(challengeId);
+      if (callback) {
+        callback({
+          challengeId,
           sessionId,
           operatorDid,
           attestations: buildAttestationsFromChallenge(challenge),
         });
-        state.attestationCallbacks.delete(args.challengeId);
+        state.attestationCallbacks.delete(challengeId);
       }
 
-      // Cache token and clean up challenge
-      const cacheKey = `${sessionId}:${resourceUri}`;
-      await state.tokenStore.set(cacheKey, result);
-      await state.challengeStore.delete(args.challengeId);
-
-      // Record accepted preconditions (cross-session via KV)
-      const keys = preconditionConfigs.map(preconditionKey);
-      await state.acceptedPreconditionStore.addAll(sessionId, keys);
+      // Clean up challenge
+      await state.challengeStore.delete(challengeId);
 
       return {
-        content: [{ type: "text", text: "x428: Attestation accepted. You may now use the tool." }],
+        content: [{ type: "text", text: "x428: Attestation accepted." }],
       };
     } catch (err) {
       return {
@@ -407,25 +413,14 @@ function ensureAttestToolRegistered(server: McpServerWithInit): void {
     }
   };
 
-  // Register with visibility: ["app"] if registerTool available (hides from model)
-  if (server.registerTool) {
-    server.registerTool(
-      "x428-attest",
-      {
-        description: "x428 attestation endpoint",
-        inputSchema: { challengeId: z.string(), accepted: z.boolean() },
-        _meta: { ui: { resourceUri: UI_RESOURCE_URI, visibility: ["app"] }, "ui/resourceUri": UI_RESOURCE_URI },
-      },
-      attestHandler,
-    );
-  } else {
-    server.tool(
-      "x428-attest",
-      "x428 attestation endpoint",
-      { challengeId: z.string(), accepted: z.boolean() },
-      attestHandler,
-    );
-  }
+  // Always use tool() for consistent argument parsing.
+  // registerTool may handle Zod schemas differently.
+  server.tool(
+    "x428-attest",
+    "x428 attestation endpoint",
+    { challengeId: z.string(), accepted: z.boolean() },
+    attestHandler,
+  );
 }
 
 // ---------------------------------------------------------------------------
