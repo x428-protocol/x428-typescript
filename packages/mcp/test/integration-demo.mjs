@@ -86,16 +86,17 @@ async function main() {
   const searchResult = await rpc("tools/call", { name: "search", arguments: { query: "test" } });
   const sr = searchResult?.result;
   console.log("   isError:", sr?.isError);
-  console.log("   content:", JSON.stringify(sr?.content).slice(0, 300));
-  console.log("   structuredContent:", JSON.stringify(sr?.structuredContent).slice(0, 500));
+  console.log("   content:", JSON.stringify(sr?.content)?.slice(0, 300));
+  console.log("   structuredContent:", JSON.stringify(sr?.structuredContent)?.slice(0, 500));
 
   const sc = sr?.structuredContent;
   if (!sc || !sc.challengeId) {
-    console.error("   No structuredContent or challengeId!");
-    // If there's text content, it might have gone through (token cached?)
     if (sr?.content?.[0]?.text?.includes("Search results")) {
-      console.log("   Tool ran directly (no precondition needed — token cached?)");
+      console.log("   Tool ran directly (preconditions already accepted in KV)");
+      console.log("\n=== Done (preconditions pre-accepted) ===");
+      process.exit(0);
     }
+    console.error("   Unexpected result — no structuredContent and no search results");
     process.exit(1);
   }
 
