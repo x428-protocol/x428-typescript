@@ -339,7 +339,7 @@ function ensureAttestToolRegistered(
   // Capture state ref so the handler uses the correct per-server context map
   const { challengeContexts } = state;
 
-  const attestHandler = async (args: { challengeId: string; accepted: boolean }, extra: McpToolExtra) => {
+  const attestHandler = async (args: { challengeId: string; accepted: boolean; challengeData?: string }, extra: McpToolExtra) => {
     if (!args.accepted) {
       return {
         content: [{ type: "text", text: "x428: User declined preconditions." }],
@@ -348,27 +348,43 @@ function ensureAttestToolRegistered(
     }
 
     // Look up challenge context: try per-server state first (same session),
-    // then fall back to module-level cross-session map (Claude Desktop).
+    // then fall back to module-level cross-session map (Claude Desktop),
+    // then fall back to challengeData sent by the App UI (cross-isolate).
     const ctx = challengeContexts.get(args.challengeId);
     const crossCtx = !ctx ? crossSessionChallenges.get(args.challengeId) : null;
 
-    if (!ctx && !crossCtx) {
+    // Parse challengeData from App UI if no local context found
+    let inlineChallenge: PreconditionChallenge | null = null;
+    let inlinePreconditionConfigs: PreconditionConfig[] | null = null;
+    if (!ctx && !crossCtx && args.challengeData) {
+      try {
+        const parsed = JSON.parse(args.challengeData);
+        inlineChallenge = parsed.challenge;
+        inlinePreconditionConfigs = parsed.preconditionConfigs;
+      } catch {
+        // Invalid JSON — fall through to error
+      }
+    }
+
+    if (!ctx && !crossCtx && !inlineChallenge) {
       return {
         content: [{ type: "text", text: "x428: No pending challenge found." }],
         isError: true,
       };
     }
 
-    // Use per-server context if available, otherwise reconstruct from cross-session data
+    // Use per-server context if available, then cross-session, then inline
     const challenge = ctx
       ? ctx.challengeStore.get(args.challengeId)
-      : crossCtx!.challenge;
-    const operatorDid = ctx?.operatorDid ?? crossCtx!.operatorDid;
-    const privateKey = ctx?.privateKey ?? crossCtx!.privateKey;
-    const tokenTtl = ctx?.tokenTtl ?? crossCtx!.tokenTtl;
-    const resourceUri = ctx?.resourceUri ?? crossCtx!.resourceUri;
-    const preconditionConfigs = ctx?.preconditionConfigs ?? crossCtx!.preconditionConfigs;
-    // For cross-session, use fresh resolver/nonceStore (stateless for self-attestation)
+      : crossCtx?.challenge ?? inlineChallenge;
+    const preconditionConfigs = ctx?.preconditionConfigs ?? crossCtx?.preconditionConfigs ?? inlinePreconditionConfigs ?? [];
+    const tokenTtl = ctx?.tokenTtl ?? crossCtx?.tokenTtl ?? 3600;
+    const resourceUri = ctx?.resourceUri ?? crossCtx?.resourceUri ?? "x428://mcp/tool";
+    // Use original keypair if available, otherwise create fresh (self-attestation)
+    const ephemeral = !ctx && !crossCtx ? createEphemeralDid() : null;
+    const operatorDid = ctx?.operatorDid ?? crossCtx?.operatorDid ?? ephemeral!.did;
+    const privateKey = ctx?.privateKey ?? crossCtx?.privateKey ?? ephemeral!.privateKey;
+    // For cross-session/inline, use fresh resolver/nonceStore (stateless for self-attestation)
     const resolver = ctx?.resolver ?? new DidKeyResolver();
     const nonceStore = ctx?.nonceStore ?? new InMemoryNonceStore();
 
@@ -439,7 +455,7 @@ function ensureAttestToolRegistered(
       "x428-attest",
       {
         description: "x428 attestation endpoint",
-        inputSchema: { challengeId: z.string(), accepted: z.boolean() },
+        inputSchema: { challengeId: z.string(), accepted: z.boolean(), challengeData: z.string().optional() },
         _meta: { ui: { resourceUri: UI_RESOURCE_URI, visibility: ["app"] }, "ui/resourceUri": UI_RESOURCE_URI },
       },
       attestHandler,
@@ -537,6 +553,14 @@ export function x428Guard(
       resourceUri, preconditionConfigs: config.preconditions,
     });
 
+    // Bundle challenge + preconditionConfigs for cross-session round-trip.
+    // The App UI sends this back with x428-attest so the attest handler
+    // can verify without needing shared storage across DO isolates.
+    const challengeData = JSON.stringify({
+      challenge,
+      preconditionConfigs: remainingPreconditions,
+    });
+
     return {
       content: [{ type: "text", text: `x428: Precondition acceptance required for ${toolName}.` }],
       structuredContent: {
@@ -544,6 +568,7 @@ export function x428Guard(
         toolName,
         toolArgs: args,
         challengeId,
+        challengeData,
         preconditions: preconditions.map((p) => ({
           type: p.type,
           ...(p.type === "tos" ? { documentUrl: p.documentUrl, tosVersion: p.tosVersion } : {}),
