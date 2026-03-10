@@ -1,7 +1,10 @@
 /**
  * Cross-session integration test: verifies that accepted preconditions
- * persist across MCP sessions via KV (simulates Claude Desktop's
- * multi-session architecture: AppBridge + Model use separate DOs).
+ * are scoped per-session (different sessions = different users on a
+ * public multi-user server must each accept independently).
+ *
+ * Also verifies within-session precondition sharing:
+ * accepting TOS for "search" also satisfies TOS for "info".
  *
  * Run: node packages/mcp/test/integration-cross-session.mjs
  */
@@ -61,25 +64,28 @@ async function createSession(name) {
 }
 
 async function main() {
-  console.log("=== x428 Cross-Session Persistence Test ===\n");
+  console.log("=== x428 Cross-Session Isolation Test ===\n");
 
   // Session A: Accept TOS precondition via search tool
-  console.log("1. Creating Session A (simulates AppBridge)...");
+  console.log("1. Creating Session A...");
   const sessionA = await createSession("A");
 
   console.log("\n2. [A] Calling 'search' — expect precondition challenge...");
   const searchResult = await sessionA.rpc("tools/call", { name: "search", arguments: { query: "test" } });
   const sc = searchResult?.result?.structuredContent;
   const searchContent = searchResult?.result?.content?.[0]?.text;
+
+  let sessionAAcceptedTos = false;
   if (searchContent?.includes("Search results")) {
-    console.log("   [A] TOS already accepted from previous run (KV cached). Skipping attest step.");
+    console.log("   [A] TOS already accepted (KV cached from same session). OK.");
+    sessionAAcceptedTos = true;
   } else if (!sc?.challengeId) {
     console.error("   Unexpected result:", JSON.stringify(searchResult?.result).slice(0, 300));
     process.exit(1);
   } else {
     console.log(`   [A] challengeId: ${sc.challengeId}`);
 
-    console.log("\n3. [A] Accepting precondition via x428-attest...");
+    console.log("\n3. [A] Accepting TOS via x428-attest...");
     const attestResult = await sessionA.rpc("tools/call", {
       name: "x428-attest",
       arguments: { challengeId: sc.challengeId, accepted: true },
@@ -90,43 +96,49 @@ async function main() {
       console.error("   Attestation failed!");
       process.exit(1);
     }
-
-    // Wait for KV propagation (eventual consistency)
-    console.log("\n4. Waiting 2s for KV propagation...");
-    await new Promise((r) => setTimeout(r, 2000));
+    sessionAAcceptedTos = true;
   }
 
-  // Session B: New session — should NOT need TOS re-acceptance for search
-  console.log("\n5. Creating Session B (simulates Model session)...");
+  // Session B: New session — SHOULD still require TOS (session isolation)
+  console.log("\n4. Creating Session B (different user/agent)...");
   const sessionB = await createSession("B");
 
-  console.log("\n6. [B] Calling 'search' — should pass through (TOS already accepted)...");
+  console.log("\n5. [B] Calling 'search' — should require TOS (session isolation)...");
   const search2Result = await sessionB.rpc("tools/call", { name: "search", arguments: { query: "cross-session" } });
   const s2r = search2Result?.result;
 
   if (s2r?.structuredContent?.x428Status === "pending") {
-    console.error("\n   FAIL: Session B still requires TOS acceptance!");
-    console.error("   Preconditions:", JSON.stringify(s2r.structuredContent.preconditions));
-    console.log("\n   This means KV cross-session persistence is NOT working.");
+    console.log("   [B] Correctly requires TOS acceptance (sessions are isolated)");
+  } else if (s2r?.content?.[0]?.text?.includes("Search results")) {
+    console.error("\n   FAIL: Session B skipped TOS — sessions are NOT isolated!");
+    console.error("   This means one user's acceptance leaks to other users.");
+    process.exit(1);
+  } else {
+    console.log("   Unexpected result:", JSON.stringify(s2r).slice(0, 300));
     process.exit(1);
   }
 
-  if (s2r?.content?.[0]?.text?.includes("Search results")) {
-    console.log(`   [B] Result: ${s2r.content[0].text.slice(0, 100)}`);
-    console.log("\n   SUCCESS: Session B got results without re-accepting TOS!");
-  } else {
-    console.log("   Unexpected result:", JSON.stringify(s2r).slice(0, 300));
+  // Session B: Accept TOS, then verify within-session precondition sharing
+  const sc2 = s2r.structuredContent;
+  console.log("\n6. [B] Accepting TOS via x428-attest...");
+  const attest2 = await sessionB.rpc("tools/call", {
+    name: "x428-attest",
+    arguments: { challengeId: sc2.challengeId, accepted: true },
+  });
+  console.log(`   [B] Result: ${attest2?.result?.content?.[0]?.text}`);
+  if (attest2?.result?.isError) {
+    console.error("   Attestation failed!");
+    process.exit(1);
   }
 
-  // Session B: Call 'lookup' — different precondition (age), should still require it
-  console.log("\n7. [B] Calling 'lookup' — should still require age verification...");
+  // Session B: Accept age precondition via lookup
+  console.log("\n7. [B] Calling 'lookup' — should require age verification...");
   const lookupResult = await sessionB.rpc("tools/call", { name: "lookup", arguments: { id: "456" } });
   const lr = lookupResult?.result;
 
   if (lr?.structuredContent?.x428Status === "pending") {
-    console.log("   [B] Correctly requires age verification (not yet accepted)");
+    console.log("   [B] Correctly requires age verification");
 
-    // Accept age precondition
     const ageChallengeId = lr.structuredContent.challengeId;
     console.log("\n8. [B] Accepting age precondition...");
     const ageAttest = await sessionB.rpc("tools/call", {
@@ -136,7 +148,6 @@ async function main() {
     console.log(`   [B] Result: ${ageAttest?.result?.content?.[0]?.text}`);
 
     if (!ageAttest?.result?.isError) {
-      // Re-call lookup
       console.log("\n9. [B] Re-calling 'lookup'...");
       const lookup2 = await sessionB.rpc("tools/call", { name: "lookup", arguments: { id: "456" } });
       if (lookup2?.result?.content?.[0]?.text?.includes("Record 456")) {
@@ -145,25 +156,26 @@ async function main() {
       }
     }
   } else if (lr?.content?.[0]?.text?.includes("Record")) {
-    console.log("   [B] Age already accepted (possibly from previous test run)");
+    console.log("   [B] Age already accepted (KV cached). OK.");
   }
 
-  // Session B: Call 'info' — requires BOTH TOS + age. Both should be accepted now.
-  console.log("\n10. [B] Calling 'info' — requires both TOS + age (both should be accepted)...");
+  // Session B: Call 'info' — requires BOTH TOS + age. Both accepted in this session now.
+  console.log("\n10. [B] Calling 'info' — requires both TOS + age (both accepted in this session)...");
   const infoResult = await sessionB.rpc("tools/call", { name: "info", arguments: { topic: "cross-session" } });
   const ir = infoResult?.result;
 
   if (ir?.content?.[0]?.text?.includes("Detailed info")) {
     console.log(`   [B] Result: ${ir.content[0].text.slice(0, 100)}`);
-    console.log("   SUCCESS: 'info' passed through — both preconditions satisfied!");
+    console.log("   SUCCESS: 'info' passed through — within-session precondition sharing works!");
   } else if (ir?.structuredContent?.x428Status === "pending") {
     console.error("   FAIL: Still requires preconditions for 'info'");
     console.error("   Remaining:", JSON.stringify(ir.structuredContent.preconditions));
+    process.exit(1);
   } else {
     console.log("   Result:", JSON.stringify(ir).slice(0, 300));
   }
 
-  console.log("\n=== All cross-session tests complete ===");
+  console.log("\n=== All tests passed ===");
   process.exit(0);
 }
 

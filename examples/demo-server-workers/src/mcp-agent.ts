@@ -41,6 +41,7 @@ export class X428McpAgent extends McpAgent<Env, {}, {}> {
           challengeStore,
           tokenStore,
           acceptedPreconditionStore,
+          fallbackMode: "apps",
           onAttestation: (entry) => auditLog.append({ ...entry, signature: "" }),
         },
         tool.name,

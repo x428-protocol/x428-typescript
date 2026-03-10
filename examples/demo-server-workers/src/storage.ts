@@ -117,34 +117,40 @@ export class DualTokenStore implements TokenStore {
 /**
  * Dual-write accepted precondition store.
  *
- * NOT scoped by sessionId — Claude Desktop creates separate AppBridge and
- * Model sessions with no correlation. Using a global key (precondition
- * identity only, with TTL) lets consent cross session boundaries.
+ * Scoped by sessionId — each MCP session must accept preconditions
+ * independently. This is correct for a public multi-user demo server
+ * where different sessions represent different users/agents.
+ *
+ * For Claude Desktop's multi-DO architecture (AppBridge + Model in
+ * separate DOs), both sessions get their own acceptance flow.
  */
 export class DualAcceptedPreconditionStore implements AcceptedPreconditionStore {
-  private memory = new Set<string>();
+  private memory = new Map<string, Set<string>>();
 
   constructor(private kv: KVNamespace, private prefix = "x428:accepted:", private ttlSeconds = 86400) {}
 
-  async getAccepted(_sessionId: string): Promise<Set<string>> {
-    // In-memory has all locally-added keys (instant)
-    if (this.memory.size > 0) return new Set(this.memory);
+  async getAccepted(sessionId: string): Promise<Set<string>> {
+    // In-memory first (same-DO, instant)
+    const local = this.memory.get(sessionId);
+    if (local && local.size > 0) return new Set(local);
 
-    // Fall back to KV for cross-session
-    const raw = await this.kv.get(this.prefix + "global");
+    // Fall back to KV (cross-request persistence for same session)
+    const raw = await this.kv.get(this.prefix + sessionId);
     if (!raw) return new Set();
     return new Set(JSON.parse(raw));
   }
 
-  async addAll(_sessionId: string, keys: string[]): Promise<void> {
-    for (const k of keys) this.memory.add(k);
+  async addAll(sessionId: string, keys: string[]): Promise<void> {
+    let set = this.memory.get(sessionId);
+    if (!set) { set = new Set(); this.memory.set(sessionId, set); }
+    for (const k of keys) set.add(k);
 
-    // Merge with KV (may already have entries from other sessions)
-    const raw = await this.kv.get(this.prefix + "global");
+    // Merge with KV for same-session persistence across requests
+    const raw = await this.kv.get(this.prefix + sessionId);
     const existing: string[] = raw ? JSON.parse(raw) : [];
     const merged = new Set(existing);
     for (const k of keys) merged.add(k);
-    await this.kv.put(this.prefix + "global", JSON.stringify([...merged]), {
+    await this.kv.put(this.prefix + sessionId, JSON.stringify([...merged]), {
       expirationTtl: this.ttlSeconds,
     });
   }
