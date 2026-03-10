@@ -11,7 +11,7 @@ import {
 import { DEMO_TOOLS } from "./demo-tools.js";
 
 interface Env {
-  X428_MCP: DurableObjectNamespace;
+  MCP_OBJECT: DurableObjectNamespace;
 }
 
 export class X428McpAgent extends McpAgent<Env, {}, {}> {

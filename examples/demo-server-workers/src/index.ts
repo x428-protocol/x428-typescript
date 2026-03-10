@@ -4,4 +4,4 @@ import { X428McpAgent } from "./mcp-agent.js";
 export { X428McpAgent };
 
 // Worker entry point — routes /mcp to the McpAgent
-export default X428McpAgent.serve("/mcp", { binding: "X428_MCP" });
+export default X428McpAgent.serve("/mcp");

@@ -5,7 +5,7 @@ compatibility_flags = ["nodejs_compat"]
 
 [durable_objects]
 bindings = [
-  { name = "X428_MCP", class_name = "X428McpAgent" }
+  { name = "MCP_OBJECT", class_name = "X428McpAgent" }
 ]
 
 [[migrations]]
