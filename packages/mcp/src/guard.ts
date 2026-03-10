@@ -77,6 +77,8 @@ export interface ChallengeStore {
 export interface TokenStore {
   get(cacheKey: string): MaybePromise<AttestationToken | null>;
   set(cacheKey: string, token: AttestationToken): MaybePromise<void>;
+  /** Remove all tokens for a session (prefix match on `${sessionId}:`). */
+  clearSession?(sessionId: string): MaybePromise<void>;
 }
 
 /**
@@ -87,6 +89,8 @@ export interface TokenStore {
 export interface AcceptedPreconditionStore {
   getAccepted(sessionId: string): MaybePromise<Set<string>>;
   addAll(sessionId: string, keys: string[]): MaybePromise<void>;
+  /** Remove all accepted preconditions for a session. */
+  clear?(sessionId: string): MaybePromise<void>;
 }
 
 export interface X428Config {
@@ -224,6 +228,7 @@ function preconditionKey(p: PreconditionConfig): string {
 
 interface ServerState {
   attestToolRegistered: boolean;
+  revokeToolRegistered: boolean;
   resourceRegistered: boolean;
   /** Raw extensions from client capabilities, captured before Zod strips them. */
   rawExtensions?: Record<string, unknown>;
@@ -244,6 +249,7 @@ function getServerState(server: McpServerWithInit): ServerState {
   if (!state) {
     state = {
       attestToolRegistered: false,
+      revokeToolRegistered: false,
       resourceRegistered: false,
       extensionsCaptured: false,
       attestationCallbacks: new Map(),
@@ -441,6 +447,51 @@ function ensureAttestToolRegistered(server: McpServerWithInit): void {
   );
 }
 
+/**
+ * Register the x428-revoke tool (once per server).
+ * Clears accepted preconditions and cached tokens for the calling session.
+ * Does NOT affect the audit log.
+ */
+function ensureRevokeToolRegistered(server: McpServerWithInit): void {
+  const state = getServerState(server);
+  if (state.revokeToolRegistered) return;
+  state.revokeToolRegistered = true;
+
+  const revokeHandler = async (_args: Record<string, never>, extra: any) => {
+    const sessionId = extra?.sessionId ?? "_default";
+
+    const cleared: string[] = [];
+
+    if (state.acceptedPreconditionStore.clear) {
+      await state.acceptedPreconditionStore.clear(sessionId);
+      cleared.push("accepted preconditions");
+    }
+
+    if (state.tokenStore.clearSession) {
+      await state.tokenStore.clearSession(sessionId);
+      cleared.push("cached tokens");
+    }
+
+    if (cleared.length === 0) {
+      return {
+        content: [{ type: "text", text: "x428: Revoke not supported by this server's stores." }],
+        isError: true,
+      };
+    }
+
+    return {
+      content: [{ type: "text", text: `x428: Revoked ${cleared.join(" and ")} for this session.` }],
+    };
+  };
+
+  server.tool(
+    "x428-revoke",
+    "Revoke accepted x428 preconditions for this session",
+    {},
+    revokeHandler,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Mode detection
 // ---------------------------------------------------------------------------
@@ -513,6 +564,7 @@ export function x428Guard(
   // Eagerly register shared infrastructure
   ensureResourceRegistered(mcpServer);
   ensureAttestToolRegistered(mcpServer);
+  ensureRevokeToolRegistered(mcpServer);
 
   const handleApps = async (
     args: any,

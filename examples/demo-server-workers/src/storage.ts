@@ -111,6 +111,18 @@ export class DualTokenStore implements TokenStore {
       expirationTtl: ttlSeconds,
     });
   }
+
+  async clearSession(sessionId: string): Promise<void> {
+    // Clear in-memory entries matching this session
+    for (const key of this.memory.keys()) {
+      if (key.startsWith(sessionId + ":")) {
+        this.memory.delete(key);
+      }
+    }
+    // KV doesn't support prefix delete — tokens expire via TTL.
+    // For immediate revocation, the accepted precondition check
+    // gates before the token cache is consulted on re-challenge.
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -170,6 +182,12 @@ export class DualAcceptedPreconditionStore implements AcceptedPreconditionStore 
     await this.kv.put(kk, JSON.stringify([...merged]), {
       expirationTtl: this.ttlSeconds,
     });
+  }
+
+  async clear(sessionId: string): Promise<void> {
+    const mk = this.memKey(sessionId);
+    this.memory.delete(mk);
+    await this.kv.delete(this.kvKey(sessionId));
   }
 }
 
