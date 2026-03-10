@@ -12,5 +12,6 @@ bindings = [
 tag = "v1"
 new_sqlite_classes = ["X428McpAgent"]
 
-# Custom domain — set CUSTOM_DOMAIN env var or override in [env.production]
-# routes = [{ pattern = "your-domain.example.com/*", custom_domain = true }]
+[[routes]]
+pattern = "demo.x428.org"
+custom_domain = true

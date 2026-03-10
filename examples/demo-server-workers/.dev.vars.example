@@ -1,2 +1,3 @@
 # Copy to .dev.vars and fill in values for local development
-# CUSTOM_DOMAIN=mcp-workers-demo.x428.org
+# These are also needed for CI/CD deployment (GitHub Actions secrets)
+CLOUDFLARE_ACCOUNT_ID=

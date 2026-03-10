@@ -177,6 +177,31 @@ interface ChallengeContext {
 }
 
 /**
+ * Serializable challenge data for cross-session lookup (Claude Desktop).
+ * Contains only plain data — no DO-specific store references that would
+ * cause "Cannot perform I/O on behalf of a different Durable Object".
+ */
+interface CrossSessionChallengeData {
+  challenge: PreconditionChallenge;
+  operatorDid: string;
+  privateKey: Uint8Array;
+  tokenTtl: number;
+  resourceUri: string;
+  preconditionConfigs: PreconditionConfig[];
+}
+
+/**
+ * Module-level map for cross-session challenge lookup.
+ * Claude Desktop creates separate AppBridge and Model sessions (ext-apps#481),
+ * each mapping to a different Durable Object. The Model DO creates the challenge;
+ * the AppBridge DO calls x428-attest. This map lets the AppBridge find the
+ * challenge data without accessing the Model DO's storage.
+ *
+ * Only stores serializable data — no DO-specific I/O objects.
+ */
+const crossSessionChallenges = new Map<string, CrossSessionChallengeData>();
+
+/**
  * Compute a stable identity key for a precondition config.
  * Two preconditions with the same key represent the same consent
  * (e.g., same TOS document+version, same age threshold).
@@ -322,15 +347,31 @@ function ensureAttestToolRegistered(
       };
     }
 
+    // Look up challenge context: try per-server state first (same session),
+    // then fall back to module-level cross-session map (Claude Desktop).
     const ctx = challengeContexts.get(args.challengeId);
-    if (!ctx) {
+    const crossCtx = !ctx ? crossSessionChallenges.get(args.challengeId) : null;
+
+    if (!ctx && !crossCtx) {
       return {
         content: [{ type: "text", text: "x428: No pending challenge found." }],
         isError: true,
       };
     }
 
-    const challenge = ctx.challengeStore.get(args.challengeId);
+    // Use per-server context if available, otherwise reconstruct from cross-session data
+    const challenge = ctx
+      ? ctx.challengeStore.get(args.challengeId)
+      : crossCtx!.challenge;
+    const operatorDid = ctx?.operatorDid ?? crossCtx!.operatorDid;
+    const privateKey = ctx?.privateKey ?? crossCtx!.privateKey;
+    const tokenTtl = ctx?.tokenTtl ?? crossCtx!.tokenTtl;
+    const resourceUri = ctx?.resourceUri ?? crossCtx!.resourceUri;
+    const preconditionConfigs = ctx?.preconditionConfigs ?? crossCtx!.preconditionConfigs;
+    // For cross-session, use fresh resolver/nonceStore (stateless for self-attestation)
+    const resolver = ctx?.resolver ?? new DidKeyResolver();
+    const nonceStore = ctx?.nonceStore ?? new InMemoryNonceStore();
+
     if (!challenge) {
       return {
         content: [{ type: "text", text: "x428: No pending challenge found." }],
@@ -340,7 +381,7 @@ function ensureAttestToolRegistered(
 
     try {
       const result = await processAttestation(
-        challenge, ctx.operatorDid, ctx.privateKey, ctx.resolver, ctx.nonceStore, ctx.tokenTtl,
+        challenge, operatorDid, privateKey, resolver, nonceStore, tokenTtl,
       );
 
       if (result instanceof X428Error) {
@@ -350,24 +391,25 @@ function ensureAttestToolRegistered(
         };
       }
 
-      // Fire audit callback before caching
+      // Fire audit callback (only available in same-session context)
       const sessionId = extra.sessionId ?? "_default";
-      if (ctx.onAttestation) {
+      if (ctx?.onAttestation) {
         ctx.onAttestation({
           challengeId: args.challengeId,
           sessionId,
-          operatorDid: ctx.operatorDid,
+          operatorDid,
           attestations: buildAttestationsFromChallenge(challenge),
         });
       }
 
-      // Cache token by the calling session's ID. The App iframe's
-      // re-call of the original tool uses the same session (AppBridge),
-      // so the token will be found by sessionId on the next call.
-      const cacheKey = `${sessionId}:${ctx.resourceUri}`;
-      ctx.tokenStore.set(cacheKey, result);
-      ctx.challengeStore.delete(args.challengeId);
+      // Cache token (only if we have the original stores — same session)
+      if (ctx) {
+        const cacheKey = `${sessionId}:${resourceUri}`;
+        ctx.tokenStore.set(cacheKey, result);
+        ctx.challengeStore.delete(args.challengeId);
+      }
       challengeContexts.delete(args.challengeId);
+      crossSessionChallenges.delete(args.challengeId);
 
       // Record accepted preconditions so other tools with the same
       // preconditions don't re-prompt (consent is per-precondition, not per-tool).
@@ -376,7 +418,7 @@ function ensureAttestToolRegistered(
         accepted = new Set();
         state.acceptedPreconditions.set(sessionId, accepted);
       }
-      for (const pc of ctx.preconditionConfigs) {
+      for (const pc of preconditionConfigs) {
         accepted.add(preconditionKey(pc));
       }
 
@@ -486,6 +528,13 @@ export function x428Guard(
       resourceUri, challengeStore: cStore, tokenStore: tStore,
       onAttestation: config.onAttestation,
       preconditionConfigs: config.preconditions,
+    });
+
+    // Also store in module-level map for cross-session lookup (Claude Desktop).
+    // Only serializable data — no DO-specific store references.
+    crossSessionChallenges.set(challengeId, {
+      challenge, operatorDid, privateKey, tokenTtl,
+      resourceUri, preconditionConfigs: config.preconditions,
     });
 
     return {
