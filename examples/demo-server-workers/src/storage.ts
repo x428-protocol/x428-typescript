@@ -31,6 +31,7 @@ interface SerializedChallengeRecord {
   tokenTtl: number;
   resourceUri: string;
   preconditionConfigs: PreconditionConfig[];
+  originSessionId: string;
 }
 
 export class DualChallengeStore implements ChallengeStore {
@@ -54,6 +55,7 @@ export class DualChallengeStore implements ChallengeStore {
       tokenTtl: data.tokenTtl,
       resourceUri: data.resourceUri,
       preconditionConfigs: data.preconditionConfigs,
+      originSessionId: data.originSessionId,
     };
   }
 
@@ -68,6 +70,7 @@ export class DualChallengeStore implements ChallengeStore {
       tokenTtl: record.tokenTtl,
       resourceUri: record.resourceUri,
       preconditionConfigs: record.preconditionConfigs,
+      originSessionId: record.originSessionId,
     };
     const ttlSeconds = ttlMs ? Math.ceil(ttlMs / 1000) : 300;
     await this.kv.put(this.prefix + challengeId, JSON.stringify(data), {
@@ -132,7 +135,7 @@ export class DualAcceptedPreconditionStore implements AcceptedPreconditionStore 
     private kv: KVNamespace,
     private prefix = "x428:accepted:",
     private ttlSeconds = 86400,
-    private scope: "session" | "global" = "global",
+    private scope: "session" | "global" = "session",
   ) {}
 
   private kvKey(sessionId: string): string {

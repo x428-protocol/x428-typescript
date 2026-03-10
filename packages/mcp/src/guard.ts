@@ -56,6 +56,10 @@ export interface ChallengeRecord {
   tokenTtl: number;
   resourceUri: string;
   preconditionConfigs: PreconditionConfig[];
+  /** SessionId of the session that generated this challenge.
+   *  Used to write accepted preconditions back to the originating session
+   *  when x428-attest is called from a different session (e.g., AppBridge). */
+  originSessionId: string;
 }
 
 /**
@@ -365,7 +369,7 @@ function ensureAttestToolRegistered(server: McpServerWithInit): void {
       };
     }
 
-    const { challenge, operatorDid, privateKey, tokenTtl, resourceUri, preconditionConfigs } = record;
+    const { challenge, operatorDid, privateKey, tokenTtl, resourceUri, preconditionConfigs, originSessionId } = record;
 
     if (!challenge?.preconditions) {
       return {
@@ -383,13 +387,23 @@ function ensureAttestToolRegistered(server: McpServerWithInit): void {
         };
       }
 
-      // Cache token by sessionId + resourceUri
-      const cacheKey = `${sessionId}:${resourceUri}`;
-      await state.tokenStore.set(cacheKey, result);
+      // Cache token for the ORIGINATING session (the one that will re-call the tool),
+      // not the attesting session (which may be a different DO in Claude Desktop).
+      const originCacheKey = `${originSessionId}:${resourceUri}`;
+      await state.tokenStore.set(originCacheKey, result);
+      // Also cache for the attesting session (same-session attest+re-call case)
+      if (sessionId !== originSessionId) {
+        const attestCacheKey = `${sessionId}:${resourceUri}`;
+        await state.tokenStore.set(attestCacheKey, result);
+      }
 
-      // Record accepted preconditions in shared store
+      // Record accepted preconditions for the originating session
       const acceptedKeys = preconditionConfigs.map((pc) => preconditionKey(pc));
-      await state.acceptedPreconditionStore.addAll(sessionId, acceptedKeys);
+      await state.acceptedPreconditionStore.addAll(originSessionId, acceptedKeys);
+      // Also record for the attesting session
+      if (sessionId !== originSessionId) {
+        await state.acceptedPreconditionStore.addAll(sessionId, acceptedKeys);
+      }
 
       // Fire onAttestation callback if registered for this challenge
       const callback = state.attestationCallbacks.get(challengeId);
@@ -519,6 +533,7 @@ export function x428Guard(
       tokenTtl,
       resourceUri,
       preconditionConfigs: config.preconditions,
+      originSessionId: sessionId,
     });
 
     // Store onAttestation callback in server state (same-session only, not serializable)
