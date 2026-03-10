@@ -1,10 +1,10 @@
 /**
  * Storage implementations for the Workers x428 demo server.
  *
- * KV-backed stores for challenges, tokens, and accepted preconditions
- * enable cross-session state sharing (e.g., Claude Desktop's separate
- * AppBridge and Model sessions map to different Durable Objects, but
- * both read/write the same KV namespace).
+ * Dual-write stores: in-memory (instant, same-DO) + KV (cross-session).
+ * Reads check in-memory first, fall back to KV. This avoids KV eventual
+ * consistency issues for same-session flows while enabling cross-session
+ * state sharing for Claude Desktop's multi-DO architecture.
  *
  * SQLite audit log uses the DO's built-in SQLite (per-DO, append-only).
  */
@@ -20,7 +20,7 @@ export interface KVNamespace {
 }
 
 // ---------------------------------------------------------------------------
-// KV-backed challenge store
+// Dual-write challenge store (in-memory + KV)
 // ---------------------------------------------------------------------------
 
 /** Serializable form of ChallengeRecord for KV storage. */
@@ -33,20 +33,34 @@ interface SerializedChallengeRecord {
   preconditionConfigs: PreconditionConfig[];
 }
 
-export class KvChallengeStore implements ChallengeStore {
+export class DualChallengeStore implements ChallengeStore {
+  private memory = new Map<string, ChallengeRecord>();
+
   constructor(private kv: KVNamespace, private prefix = "x428:challenge:") {}
 
   async get(challengeId: string): Promise<ChallengeRecord | null> {
+    // In-memory first (same-DO, instant)
+    const local = this.memory.get(challengeId);
+    if (local) return local;
+
+    // Fall back to KV (cross-session)
     const raw = await this.kv.get(this.prefix + challengeId);
     if (!raw) return null;
     const data: SerializedChallengeRecord = JSON.parse(raw);
     return {
-      ...data,
+      challenge: data.challenge,
+      operatorDid: data.operatorDid,
       privateKey: base64ToUint8Array(data.privateKeyBase64),
+      tokenTtl: data.tokenTtl,
+      resourceUri: data.resourceUri,
+      preconditionConfigs: data.preconditionConfigs,
     };
   }
 
   async set(challengeId: string, record: ChallengeRecord, ttlMs?: number): Promise<void> {
+    // Write to both stores
+    this.memory.set(challengeId, record);
+
     const data: SerializedChallengeRecord = {
       challenge: record.challenge,
       operatorDid: record.operatorDid,
@@ -62,24 +76,32 @@ export class KvChallengeStore implements ChallengeStore {
   }
 
   async delete(challengeId: string): Promise<void> {
+    this.memory.delete(challengeId);
     await this.kv.delete(this.prefix + challengeId);
   }
 }
 
 // ---------------------------------------------------------------------------
-// KV-backed token store
+// Dual-write token store (in-memory + KV)
 // ---------------------------------------------------------------------------
 
-export class KvTokenStore implements TokenStore {
+export class DualTokenStore implements TokenStore {
+  private memory = new Map<string, AttestationToken>();
+
   constructor(private kv: KVNamespace, private prefix = "x428:token:") {}
 
   async get(cacheKey: string): Promise<AttestationToken | null> {
+    const local = this.memory.get(cacheKey);
+    if (local) return local;
+
     const raw = await this.kv.get(this.prefix + cacheKey);
     if (!raw) return null;
     return JSON.parse(raw);
   }
 
   async set(cacheKey: string, token: AttestationToken): Promise<void> {
+    this.memory.set(cacheKey, token);
+
     const expiresAt = new Date(token.expiresAt).getTime();
     const ttlSeconds = Math.max(1, Math.ceil((expiresAt - Date.now()) / 1000));
     await this.kv.put(this.prefix + cacheKey, JSON.stringify(token), {
@@ -89,33 +111,40 @@ export class KvTokenStore implements TokenStore {
 }
 
 // ---------------------------------------------------------------------------
-// KV-backed accepted precondition store
+// Dual-write accepted precondition store (in-memory + KV)
 // ---------------------------------------------------------------------------
 
 /**
- * KV-backed accepted precondition store.
+ * Dual-write accepted precondition store.
  *
- * Deliberately NOT scoped by sessionId — Claude Desktop creates separate
- * AppBridge and Model sessions (different Mcp-Session-Id values) with no
- * correlation ID. Accepted preconditions stored by AppBridge must be
- * visible to Model. Using precondition key alone (with TTL) achieves this.
- *
- * For production multi-user deployments, scope by authenticated user ID
- * instead of MCP session ID.
+ * NOT scoped by sessionId — Claude Desktop creates separate AppBridge and
+ * Model sessions with no correlation. Using a global key (precondition
+ * identity only, with TTL) lets consent cross session boundaries.
  */
-export class KvAcceptedPreconditionStore implements AcceptedPreconditionStore {
+export class DualAcceptedPreconditionStore implements AcceptedPreconditionStore {
+  private memory = new Set<string>();
+
   constructor(private kv: KVNamespace, private prefix = "x428:accepted:", private ttlSeconds = 86400) {}
 
   async getAccepted(_sessionId: string): Promise<Set<string>> {
+    // In-memory has all locally-added keys (instant)
+    if (this.memory.size > 0) return new Set(this.memory);
+
+    // Fall back to KV for cross-session
     const raw = await this.kv.get(this.prefix + "global");
     if (!raw) return new Set();
     return new Set(JSON.parse(raw));
   }
 
   async addAll(_sessionId: string, keys: string[]): Promise<void> {
-    const existing = await this.getAccepted("");
-    for (const k of keys) existing.add(k);
-    await this.kv.put(this.prefix + "global", JSON.stringify([...existing]), {
+    for (const k of keys) this.memory.add(k);
+
+    // Merge with KV (may already have entries from other sessions)
+    const raw = await this.kv.get(this.prefix + "global");
+    const existing: string[] = raw ? JSON.parse(raw) : [];
+    const merged = new Set(existing);
+    for (const k of keys) merged.add(k);
+    await this.kv.put(this.prefix + "global", JSON.stringify([...merged]), {
       expirationTtl: this.ttlSeconds,
     });
   }

@@ -2,9 +2,9 @@ import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { x428Guard } from "@x428/mcp";
 import {
-  KvChallengeStore,
-  KvTokenStore,
-  KvAcceptedPreconditionStore,
+  DualChallengeStore,
+  DualTokenStore,
+  DualAcceptedPreconditionStore,
   initAuditTable,
   SqliteAuditLog,
 } from "./storage.js";
@@ -22,10 +22,10 @@ export class X428McpAgent extends McpAgent<Env, {}, {}> {
   });
 
   async init() {
-    // KV-backed stores — shared across all DOs (cross-session)
-    const challengeStore = new KvChallengeStore(this.env.X428_KV);
-    const tokenStore = new KvTokenStore(this.env.X428_KV);
-    const acceptedPreconditionStore = new KvAcceptedPreconditionStore(this.env.X428_KV);
+    // Dual stores: in-memory (instant, same-DO) + KV (cross-session)
+    const challengeStore = new DualChallengeStore(this.env.X428_KV);
+    const tokenStore = new DualTokenStore(this.env.X428_KV);
+    const acceptedPreconditionStore = new DualAcceptedPreconditionStore(this.env.X428_KV);
 
     // SQLite audit log — per-DO, append-only
     const sql = this.ctx.storage.sql;
