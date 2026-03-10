@@ -92,19 +92,30 @@ export class KvTokenStore implements TokenStore {
 // KV-backed accepted precondition store
 // ---------------------------------------------------------------------------
 
+/**
+ * KV-backed accepted precondition store.
+ *
+ * Deliberately NOT scoped by sessionId — Claude Desktop creates separate
+ * AppBridge and Model sessions (different Mcp-Session-Id values) with no
+ * correlation ID. Accepted preconditions stored by AppBridge must be
+ * visible to Model. Using precondition key alone (with TTL) achieves this.
+ *
+ * For production multi-user deployments, scope by authenticated user ID
+ * instead of MCP session ID.
+ */
 export class KvAcceptedPreconditionStore implements AcceptedPreconditionStore {
   constructor(private kv: KVNamespace, private prefix = "x428:accepted:", private ttlSeconds = 86400) {}
 
-  async getAccepted(sessionId: string): Promise<Set<string>> {
-    const raw = await this.kv.get(this.prefix + sessionId);
+  async getAccepted(_sessionId: string): Promise<Set<string>> {
+    const raw = await this.kv.get(this.prefix + "global");
     if (!raw) return new Set();
     return new Set(JSON.parse(raw));
   }
 
-  async addAll(sessionId: string, keys: string[]): Promise<void> {
-    const existing = await this.getAccepted(sessionId);
+  async addAll(_sessionId: string, keys: string[]): Promise<void> {
+    const existing = await this.getAccepted("");
     for (const k of keys) existing.add(k);
-    await this.kv.put(this.prefix + sessionId, JSON.stringify([...existing]), {
+    await this.kv.put(this.prefix + "global", JSON.stringify([...existing]), {
       expirationTtl: this.ttlSeconds,
     });
   }
