@@ -25,6 +25,9 @@ export class X428McpAgent extends McpAgent<Env, {}, {}> {
     initTables(sql as any);
 
     const nonceStore = new SqliteNonceStore(sql as any);
+    const challengeStore = new SqliteChallengeStore(sql as any);
+    const tokenStore = new SqliteTokenStore(sql as any);
+    const auditLog = new SqliteAuditLog(sql as any);
 
     for (const tool of DEMO_TOOLS) {
       x428Guard(
@@ -33,6 +36,9 @@ export class X428McpAgent extends McpAgent<Env, {}, {}> {
           preconditions: tool.preconditions,
           resourceUri: tool.resourceUri,
           nonceStore,
+          challengeStore,
+          tokenStore,
+          onAttestation: (entry) => auditLog.append({ ...entry, signature: "" }),
         },
         tool.name,
         {

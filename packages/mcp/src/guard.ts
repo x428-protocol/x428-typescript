@@ -65,6 +65,13 @@ export interface X428Config {
   nonceStore?: NonceStore;
   challengeStore?: ChallengeStore;
   tokenStore?: TokenStore;
+  /** Called after successful attestation verification. */
+  onAttestation?: (entry: {
+    challengeId: string;
+    sessionId: string;
+    operatorDid: string;
+    attestations: unknown[];
+  }) => void;
 }
 
 /**
@@ -269,6 +276,7 @@ function ensureAttestToolRegistered(
   resourceUri: string,
   challengeStoreOverride: ChallengeStore,
   tokenStoreOverride: TokenStore,
+  onAttestation?: X428Config["onAttestation"],
 ): void {
   const state = getServerState(server);
   if (state.attestToolRegistered) return;
@@ -302,10 +310,20 @@ function ensureAttestToolRegistered(
         };
       }
 
+      // Fire audit callback before caching
+      const sessionId = extra.sessionId ?? "_default";
+      if (onAttestation) {
+        onAttestation({
+          challengeId: args.challengeId,
+          sessionId,
+          operatorDid,
+          attestations: buildAttestationsFromChallenge(challenge),
+        });
+      }
+
       // Cache token by the calling session's ID. The App iframe's
       // re-call of the original tool uses the same session (AppBridge),
       // so the token will be found by sessionId on the next call.
-      const sessionId = extra.sessionId ?? "_default";
       const cacheKey = `${sessionId}:${resourceUri}`;
       tokenStoreOverride.set(cacheKey, result);
       challengeStoreOverride.delete(args.challengeId);
@@ -379,7 +397,7 @@ export function x428Guard(
   ensureResourceRegistered(mcpServer);
   ensureAttestToolRegistered(
     mcpServer, operatorDid, privateKey, resolver, nonceStore, tokenTtl, resourceUri,
-    cStore, tStore,
+    cStore, tStore, config.onAttestation,
   );
 
   const toolCallback = async (args: any, extra: McpToolExtra) => {

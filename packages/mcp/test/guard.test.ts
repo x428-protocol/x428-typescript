@@ -503,6 +503,67 @@ describe("x428Guard — pluggable stores", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// onAttestation audit callback
+// ---------------------------------------------------------------------------
+
+describe("x428Guard — onAttestation callback", () => {
+  it("fires onAttestation with correct data after successful attestation", async () => {
+    const mcpServer = createMockMcpServer();
+    const handler = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "result" }] });
+    const onAttestation = vi.fn();
+
+    x428Guard(mcpServer, {
+      preconditions: [
+        { type: "tos", tosVersion: "1.0", documentUrl: "https://example.com/tos", documentHash: "sha256-abc" },
+      ],
+      onAttestation,
+    }, "audited-tool", {}, handler);
+
+    await mcpServer.simulateInitialize();
+    const extra = mockExtra("audit-session");
+
+    // First call → pending
+    const pending = await mcpServer.callTool("audited-tool", {}, extra);
+    const challengeId = pending.structuredContent.challengeId;
+    expect(onAttestation).not.toHaveBeenCalled();
+
+    // Accept attestation → should fire callback
+    await mcpServer.callTool("x428-attest", { challengeId, accepted: true }, extra);
+    expect(onAttestation).toHaveBeenCalledOnce();
+
+    const entry = onAttestation.mock.calls[0][0];
+    expect(entry.challengeId).toBe(challengeId);
+    expect(entry.sessionId).toBe("audit-session");
+    expect(entry.operatorDid).toMatch(/^did:key:/);
+    expect(Array.isArray(entry.attestations)).toBe(true);
+    expect(entry.attestations.length).toBe(1);
+    expect(entry.attestations[0].type).toBe("tos");
+  });
+
+  it("does not fire onAttestation when attestation is declined", async () => {
+    const mcpServer = createMockMcpServer();
+    const handler = vi.fn();
+    const onAttestation = vi.fn();
+
+    x428Guard(mcpServer, {
+      preconditions: [
+        { type: "tos", tosVersion: "1.0", documentUrl: "https://example.com/tos", documentHash: "sha256-abc" },
+      ],
+      onAttestation,
+    }, "declined-tool", {}, handler);
+
+    await mcpServer.simulateInitialize();
+    const extra = mockExtra("decline-session");
+
+    const pending = await mcpServer.callTool("declined-tool", {}, extra);
+    const challengeId = pending.structuredContent.challengeId;
+
+    await mcpServer.callTool("x428-attest", { challengeId, accepted: false }, extra);
+    expect(onAttestation).not.toHaveBeenCalled();
+  });
+});
+
 describe("ensureExtensionsCapture timing", () => {
   it("captures extensions even when _onrequest is set after patching", async () => {
     // Simulate McpAgent lifecycle: init() before connect()
