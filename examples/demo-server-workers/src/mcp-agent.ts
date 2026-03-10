@@ -1,5 +1,6 @@
 import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker";
 import { x428Guard } from "@x428/mcp";
 import {
   DualChallengeStore,
@@ -16,10 +17,10 @@ interface Env {
 }
 
 export class X428McpAgent extends McpAgent<Env, {}, {}> {
-  server = new McpServer({
-    name: "x428-demo-workers",
-    version: "0.1.0",
-  });
+  server = new McpServer(
+    { name: "x428-demo-workers", version: "0.1.0" },
+    { jsonSchemaValidator: new CfWorkerJsonSchemaValidator() },
+  );
 
   async init() {
     // Dual stores: in-memory (instant, same-DO) + KV (cross-session)
